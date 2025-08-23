@@ -1,60 +1,69 @@
+# bot/handlers/add_task.py
+
 from aiogram import Router, F
 from aiogram.types import Message, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from datetime import datetime
+import logging
 
 from fsm.states import AddTask
 from database.session import get_session
 from database.crud import get_user_by_telegram_id, create_task
-
 from bot.keyboards.main_menu import main_menu_keyboard
 
-import logging
+router = Router()
 logger = logging.getLogger(__name__)
 
-router = Router()
 
-
-# ─────────────────────────────
-# مرحله 1: شروع افزودن تسک
-# ─────────────────────────────
+# ────────────────────────────────────────────────
+# 🎯 مرحله 1: شروع افزودن تسک
+# ────────────────────────────────────────────────
 @router.message(F.text == "➕ افزودن تسک")
 async def start_add_task(message: Message, state: FSMContext):
+    """
+    مرحله آغاز افزودن تسک - درخواست محتوای تسک از کاربر
+    """
+    logger.info(f"[➕ START] User {message.from_user.id} وارد افزودن تسک شد.")
     await message.answer(
-        "📝 لطفاً محتوای تسک را وارد کن (مثلاً: خرید نان):",
+        "📝 لطفاً محتوای تسک رو وارد کن (مثلاً: خرید نان):",
         reply_markup=ReplyKeyboardRemove()
     )
     await state.set_state(AddTask.waiting_for_content)
-    logger.info(f"[➕ ADD_TASK] User {message.from_user.id} -> وارد مرحله محتوا شد.")
 
 
-# ─────────────────────────────
-# مرحله 2: وارد کردن محتوا
-# ─────────────────────────────
+# ────────────────────────────────────────────────
+# ✍️ مرحله 2: دریافت محتوای تسک
+# ────────────────────────────────────────────────
 @router.message(AddTask.waiting_for_content, F.text)
-async def process_content(message: Message, state: FSMContext):
+async def receive_content(message: Message, state: FSMContext):
+    """
+    دریافت و اعتبارسنجی محتوای تسک
+    """
     content = message.text.strip()
 
-    if not content:
-        await message.answer("❗ لطفاً محتوای تسک را وارد کن.")
+    if not content or len(content) < 2:
+        await message.answer("❗ محتوای تسک معتبر نیست. لطفاً دوباره وارد کن.")
         return
 
     await state.update_data(content=content)
-    await message.answer("📅 تاریخ سررسید را وارد کن (مثلاً 1403-01-15) یا بنویس «ندارم»:")
     await state.set_state(AddTask.waiting_for_due_date)
+    await message.answer("📅 تاریخ سررسید رو وارد کن (مثلاً 1403-01-15) یا بنویس «ندارم»:")
 
 
-# ─────────────────────────────
-# مرحله 3: ذخیره‌سازی
-# ─────────────────────────────
+# ────────────────────────────────────────────────
+# ⏰ مرحله 3: دریافت تاریخ و ذخیره‌سازی تسک
+# ────────────────────────────────────────────────
 @router.message(AddTask.waiting_for_due_date, F.text)
-async def process_due_date(message: Message, state: FSMContext):
-    due_date_text = message.text.strip()
+async def receive_due_date(message: Message, state: FSMContext):
+    """
+    دریافت تاریخ سررسید (اختیاری) و ذخیره تسک در دیتابیس
+    """
     user_id = message.from_user.id
+    due_date_text = message.text.strip()
+    due_date = None
 
-    if due_date_text.lower() in ["ندارم", "nadarom", "نداروم"]:
-        due_date = None
-    else:
+    # 📆 اعتبارسنجی تاریخ
+    if due_date_text.lower() not in ["ندارم", "nadarom", "نداروم"]:
         try:
             due_date = datetime.strptime(due_date_text, "%Y-%m-%d")
         except ValueError:
@@ -66,24 +75,21 @@ async def process_due_date(message: Message, state: FSMContext):
 
     async with get_session() as session:
         db_user = await get_user_by_telegram_id(session, telegram_id=user_id)
+
         if not db_user:
-            await message.answer("❗ مشکلی در شناسایی شما پیش آمد.")
+            logger.warning(f"[❌ USER NOT FOUND] telegram_id={user_id}")
+            await message.answer("⚠️ کاربر شناسایی نشد. لطفاً /start رو بزن.")
             await state.clear()
             return
 
-        task = await create_task(
-            session=session,
-            user_id=db_user.id,
-            content=content,
-            due_date=due_date
-        )
+        task = await create_task(session, user_id=db_user.id, content=content, due_date=due_date)
 
         if task:
+            logger.info(f"[✅ TASK CREATED] User {user_id} -> Task(id={task.id}) ثبت شد.")
             await message.answer("✅ تسک با موفقیت ذخیره شد! 🎉")
         else:
-            await message.answer("⚠️ مشکلی در ذخیره تسک پیش آمد.")
+            logger.error(f"[💥 FAILED] User {user_id} -> ذخیره تسک شکست خورد.")
+            await message.answer("❗ مشکلی در ذخیره تسک پیش اومد. لطفاً دوباره امتحان کن.")
 
     await state.clear()
-
-    # نمایش مجدد منوی اصلی
     await message.answer("🔙 برگشت به منوی اصلی:", reply_markup=main_menu_keyboard())

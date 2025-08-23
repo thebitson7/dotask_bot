@@ -1,32 +1,41 @@
+# core/config.py
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
 
 class Settings(BaseSettings):
     """
-    تنظیمات اصلی پروژه Dotask Bot
-    مقادیر از فایل `.env` یا متغیرهای محیطی سیستم بارگذاری می‌شوند.
+    🔧 Project Configuration for Dotask Bot
+    
+    All values are loaded from the `.env` file or system environment variables.
+    Easily switchable between environments like: development, production, test.
     """
 
-    # --- تنظیمات ربات ---
-    BOT_TOKEN: str  # توکن ربات تلگرام (اجباری)
+    # ─────[ Telegram Bot ]─────
+    BOT_TOKEN: str  # ✅ Required: Telegram Bot Token
 
-    # --- دیتابیس ---
-    DB_URL: str = "sqlite+aiosqlite:///db.sqlite3"
+    # ─────[ Database ]─────
+    DB_URL: str = "sqlite+aiosqlite:///db.sqlite3"  # Default to local SQLite
 
-    # --- تنظیمات پیش‌فرض ---
+    # ─────[ Defaults ]─────
     DEFAULT_LANG: str = "fa"
     TZ: str = "Asia/Tehran"
 
-    # --- حالت اجرا (اختیاری، برای آینده) ---
-    ENV: str = "development"  # development | production | test
+    # ─────[ Environment ]─────
+    ENV: str = "development"  # Options: development | production | test
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"  # Ignore unknown env vars
+    )
 
 
 @lru_cache()
 def get_settings() -> Settings:
     """
-    دریافت تنظیمات به‌صورت singleton (کش شده)
+    📦 Singleton accessor for project settings
+    (using LRU cache for efficiency)
     """
     return Settings()

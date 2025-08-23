@@ -1,36 +1,38 @@
+# database/crud.py
+
 from typing import Optional, List
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.exc import SQLAlchemyError
-from database.models import User, Task
 from datetime import datetime
+
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from database.models import User, Task
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 # ───────────────────────────────────────────────
-# 👤 واکشی کاربر بر اساس telegram_id
+# 👤 Get user by Telegram ID
 # ───────────────────────────────────────────────
 async def get_user_by_telegram_id(
     session: AsyncSession,
     telegram_id: int
 ) -> Optional[User]:
-    """
-    دریافت کاربر بر اساس آیدی تلگرام.
-    """
+    """Retrieve a user based on their Telegram ID."""
     try:
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
         return result.scalars().first()
     except SQLAlchemyError as e:
-        logger.exception(f"[❌ DB] خطا در get_user_by_telegram_id: {e}")
+        logger.exception(f"[DB] Failed to fetch user by telegram_id={telegram_id}: {e}")
         return None
 
 
 # ───────────────────────────────────────────────
-# ✅ ایجاد یا به‌روزرسانی کاربر
+# ✅ Create or Update User
 # ───────────────────────────────────────────────
 async def create_or_update_user(
     session: AsyncSession,
@@ -40,8 +42,7 @@ async def create_or_update_user(
     language: str = "fa"
 ) -> Optional[User]:
     """
-    اگر کاربر قبلاً وجود داشته باشد، اطلاعات او به‌روزرسانی می‌شود.
-    در غیر این صورت، یک کاربر جدید ساخته می‌شود.
+    Upserts a user: updates info if exists, else creates a new user.
     """
     try:
         user = await get_user_by_telegram_id(session, telegram_id)
@@ -76,12 +77,12 @@ async def create_or_update_user(
 
     except SQLAlchemyError as e:
         await session.rollback()
-        logger.exception(f"[❌ DB] خطا در create_or_update_user: {e}")
+        logger.exception(f"[DB] Failed to create/update user: {e}")
         return None
 
 
 # ───────────────────────────────────────────────
-# 📝 ایجاد تسک جدید برای کاربر
+# 📝 Create New Task
 # ───────────────────────────────────────────────
 async def create_task(
     session: AsyncSession,
@@ -89,36 +90,33 @@ async def create_task(
     content: str,
     due_date: Optional[datetime] = None
 ) -> Optional[Task]:
-    """
-    ایجاد یک تسک جدید برای کاربر با شناسه کاربری و محتوای تسک.
-    """
+    """Creates a new task for the given user."""
     try:
         task = Task(
             user_id=user_id,
             content=content,
             due_date=due_date,
-            is_done=False  # اطمینان از مقدار پیش‌فرض
+            is_done=False
         )
         session.add(task)
         await session.commit()
         await session.refresh(task)
         return task
+
     except SQLAlchemyError as e:
         await session.rollback()
-        logger.exception(f"[❌ DB] خطا در create_task: {e}")
+        logger.exception(f"[DB] Failed to create task for user_id={user_id}: {e}")
         return None
 
 
 # ───────────────────────────────────────────────
-# 📋 دریافت لیست تسک‌ها بر اساس user_id
+# 📋 Fetch Tasks for User
 # ───────────────────────────────────────────────
 async def get_tasks_by_user_id(
     session: AsyncSession,
     user_id: int
 ) -> List[Task]:
-    """
-    دریافت همه تسک‌های مرتبط با کاربر به ترتیب جدید به قدیم.
-    """
+    """Returns all tasks for a given user in descending order of creation."""
     try:
         result = await session.execute(
             select(Task)
@@ -127,5 +125,5 @@ async def get_tasks_by_user_id(
         )
         return result.scalars().all()
     except SQLAlchemyError as e:
-        logger.exception(f"[❌ DB] خطا در get_tasks_by_user_id: {e}")
+        logger.exception(f"[DB] Failed to fetch tasks for user_id={user_id}: {e}")
         return []
