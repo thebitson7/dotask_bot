@@ -14,25 +14,24 @@ logger = logging.getLogger(__name__)
 
 
 # ───────────────────────────────────────────────
-# 👤 Get user by Telegram ID
+# 👤 دریافت کاربر بر اساس آیدی تلگرام
 # ───────────────────────────────────────────────
 async def get_user_by_telegram_id(
     session: AsyncSession,
     telegram_id: int
 ) -> Optional[User]:
-    """Retrieve a user based on their Telegram ID."""
     try:
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
         return result.scalars().first()
     except SQLAlchemyError as e:
-        logger.exception(f"[DB] Failed to fetch user by telegram_id={telegram_id}: {e}")
+        logger.exception(f"[DB] ❌ خطا در دریافت کاربر: telegram_id={telegram_id} -> {e}")
         return None
 
 
 # ───────────────────────────────────────────────
-# ✅ Create or Update User
+# ✅ ساخت یا بروزرسانی کاربر
 # ───────────────────────────────────────────────
 async def create_or_update_user(
     session: AsyncSession,
@@ -41,9 +40,6 @@ async def create_or_update_user(
     username: Optional[str] = None,
     language: str = "fa"
 ) -> Optional[User]:
-    """
-    Upserts a user: updates info if exists, else creates a new user.
-    """
     try:
         user = await get_user_by_telegram_id(session, telegram_id)
 
@@ -77,12 +73,12 @@ async def create_or_update_user(
 
     except SQLAlchemyError as e:
         await session.rollback()
-        logger.exception(f"[DB] Failed to create/update user: {e}")
+        logger.exception(f"[DB] ❌ خطا در ساخت/بروزرسانی کاربر: {e}")
         return None
 
 
 # ───────────────────────────────────────────────
-# 📝 Create New Task
+# 📝 ساخت تسک جدید
 # ───────────────────────────────────────────────
 async def create_task(
     session: AsyncSession,
@@ -90,7 +86,6 @@ async def create_task(
     content: str,
     due_date: Optional[datetime] = None
 ) -> Optional[Task]:
-    """Creates a new task for the given user."""
     try:
         task = Task(
             user_id=user_id,
@@ -105,18 +100,17 @@ async def create_task(
 
     except SQLAlchemyError as e:
         await session.rollback()
-        logger.exception(f"[DB] Failed to create task for user_id={user_id}: {e}")
+        logger.exception(f"[DB] ❌ خطا در ساخت تسک: user_id={user_id} -> {e}")
         return None
 
 
 # ───────────────────────────────────────────────
-# 📋 Fetch Tasks for User
+# 📋 دریافت لیست تسک‌ها بر اساس آی‌دی کاربر
 # ───────────────────────────────────────────────
 async def get_tasks_by_user_id(
     session: AsyncSession,
     user_id: int
 ) -> List[Task]:
-    """Returns all tasks for a given user in descending order of creation."""
     try:
         result = await session.execute(
             select(Task)
@@ -125,5 +119,45 @@ async def get_tasks_by_user_id(
         )
         return result.scalars().all()
     except SQLAlchemyError as e:
-        logger.exception(f"[DB] Failed to fetch tasks for user_id={user_id}: {e}")
+        logger.exception(f"[DB] ❌ خطا در دریافت تسک‌ها: user_id={user_id} -> {e}")
         return []
+
+
+# ───────────────────────────────────────────────
+# ✅ علامت‌گذاری تسک به‌عنوان انجام‌شده
+# ───────────────────────────────────────────────
+async def mark_task_as_done(
+    session: AsyncSession,
+    user_id: int,
+    task_id: int
+) -> Optional[Task]:
+    """
+    علامت‌گذاری تسک به‌عنوان انجام‌شده با استفاده از ID تسک.
+    """
+    try:
+        result = await session.execute(
+            select(Task).where(Task.id == task_id, Task.user_id == user_id)
+        )
+        task = result.scalars().first()
+
+        if not task:
+            logger.warning(f"[⚠️ TASK NOT FOUND] task_id={task_id}, user_id={user_id}")
+            return None
+
+        if task.is_done:
+            logger.info(f"[ℹ️ TASK ALREADY DONE] task_id={task_id}")
+            return None
+
+        task.is_done = True
+        task.done_at = datetime.utcnow()
+
+        await session.commit()
+        await session.refresh(task)
+
+        logger.info(f"[✅ TASK DONE] task_id={task.id}, user_id={user_id}")
+        return task
+
+    except SQLAlchemyError as e:
+        await session.rollback()
+        logger.exception(f"[DB] ❌ خطا در انجام تسک: task_id={task_id}, user_id={user_id} -> {e}")
+        return None

@@ -1,5 +1,20 @@
-aiogram[fast]
-python-dotenv
-pydantic
-SQLAlchemy
-aiosqlite
+# Core Bot Framework
+aiogram[fast]>=3.4
+
+# Environment & Settings
+python-dotenv>=1.0.1
+pydantic-settings>=2.2.1
+pydantic>=2.5
+
+# Async Database Stack
+SQLAlchemy[asyncio]>=2.0
+aiosqlite>=0.19.0
+
+# Logging (اختیاری برای توسعه بهتر)
+loguru>=0.7.2
+
+# Date handling (اختیاری برای آینده مثلاً تبدیل تاریخ شمسی و ... )
+python-dateutil>=2.8.2
+
+# Future CLI یا ابزار مدیریت پروژه (اختیاری)
+typer[all]>=0.12
