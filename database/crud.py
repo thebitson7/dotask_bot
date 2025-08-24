@@ -165,3 +165,33 @@ async def mark_task_as_done(
         await session.rollback()
         logger.exception(f"[❌ DB ERROR] mark_task_as_done -> task_id={task_id}, {e}")
         return None
+# ───────────────────────────────────────────────
+# 🗑 حذف تسک بر اساس شناسه
+# ───────────────────────────────────────────────
+async def delete_task_by_id(
+    session: AsyncSession,
+    user_id: int,
+    task_id: int
+) -> bool:
+    """
+    حذف تسکی که متعلق به کاربر و دارای شناسه مشخص است.
+    """
+    try:
+        result = await session.execute(
+            select(Task).where(Task.id == task_id, Task.user_id == user_id)
+        )
+        task = result.scalars().first()
+
+        if not task:
+            logger.warning(f"[⚠️ TASK NOT FOUND] Cannot delete: task_id={task_id}, user_id={user_id}")
+            return False
+
+        await session.delete(task)
+        await session.commit()
+        logger.info(f"[🗑 TASK DELETED] task_id={task.id}, user_id={user_id}")
+        return True
+
+    except SQLAlchemyError as e:
+        await session.rollback()
+        logger.exception(f"[❌ DB ERROR] delete_task_by_id -> task_id={task_id}, user_id={user_id}, {e}")
+        return False

@@ -3,7 +3,7 @@
 from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot.keyboards.main_menu import main_menu_keyboard
 from database.session import get_session
@@ -16,13 +16,13 @@ logger = logging.getLogger(__name__)
 
 
 # ───────────────────────────────────────────────
-# 🎛 ساخت دکمه «انجام شد» برای تسک
+# 🎛 ساخت دکمه‌های مربوط به هر تسک
 # ───────────────────────────────────────────────
 def get_task_inline_keyboard(task_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✅ انجام شد",
-        callback_data=f"done:{task_id}"
+    builder.row(
+        InlineKeyboardButton(text="✅ انجام شد", callback_data=f"done:{task_id}"),
+        InlineKeyboardButton(text="🗑 حذف", callback_data=f"delete:{task_id}")
     )
     return builder.as_markup()
 
@@ -59,9 +59,8 @@ async def handle_list_tasks(message: Message):
                     f"{due_text} | {status_text}"
                 )
 
-                reply_markup = None
-                if not task.is_done:
-                    reply_markup = get_task_inline_keyboard(task.id)
+                # فقط تسک‌های ناتمام دکمه حذف و انجام دارند
+                reply_markup = get_task_inline_keyboard(task.id) if not task.is_done else None
 
                 await message.answer(message_text, reply_markup=reply_markup)
 

@@ -6,8 +6,8 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.strategy import FSMStrategy
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
@@ -19,22 +19,23 @@ from bot.keyboards.main_menu import main_menu_keyboard
 from bot.handlers import (
     add_task,
     mark_done,
+    delete_task,  # ⬅️ اضافه‌شده برای حذف تسک
     menu,
 )
 
 # ─────────────────────────────────────────────
-# 🔧 لاگ مرکزی پروژه
+# 🔧 Logging Configuration
 # ─────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.DEBUG if get_settings().ENV == "development" else logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger("DoTask")
 settings = get_settings()
 
 
 # ─────────────────────────────────────────────
-# 🚀 تابع اصلی اجرا
+# 🚀 Main Bot Entry Point
 # ─────────────────────────────────────────────
 async def main() -> None:
     logger.info("🔄 Initializing database...")
@@ -51,18 +52,23 @@ async def main() -> None:
         fsm_strategy=FSMStrategy.CHAT
     )
 
-    # ───────────── ثبت روترها ─────────────
-    dp.include_router(add_task.router)
-    dp.include_router(mark_done.router)
-    dp.include_router(menu.router)
+    # ──────────────────────────────
+    # 🔌 Register all routers
+    # ──────────────────────────────
+    dp.include_routers(
+        add_task.router,
+        mark_done.router,
+        delete_task.router,  # ✅ حذف تسک
+        menu.router
+    )
 
-    # ─────────────────────────────────────────
-    # 👋 هندل فرمان /start
-    # ─────────────────────────────────────────
+    # ──────────────────────────────
+    # 👋 Handle /start command
+    # ──────────────────────────────
     @dp.message(CommandStart())
     async def handle_start(message: Message) -> None:
         from_user = message.from_user
-        logger.info(f"[👋 START] {from_user.full_name} ({from_user.id}) وارد شد.")
+        logger.info(f"[👋 START] {from_user.full_name} ({from_user.id}) started bot.")
 
         async with get_session() as session:
             await crud.create_or_update_user(
@@ -74,25 +80,25 @@ async def main() -> None:
             )
 
         await message.answer(
-            "<b>🎉 خوش اومدی به DoTask!</b>\n\n"
-            "من اینجام تا کمکت کنم تسک‌هات رو حرفه‌ای مدیریت کنی.\n"
-            "با من می‌تونی:\n"
-            "➕ تسک جدید بسازی\n"
-            "📋 لیست وظایف‌ت رو ببینی\n"
-            "⚙️ تنظیمات رو تغییر بدی\n\n"
-            "👇 یکی از گزینه‌های زیر رو انتخاب کن:",
+            "<b>🎉 Welcome to DoTask!</b>\n\n"
+            "I’m here to help you manage your tasks like a pro! 🧠\n\n"
+            "You can:\n"
+            "➕ Add new tasks\n"
+            "📋 View your to-dos\n"
+            "⚙️ Adjust settings\n\n"
+            "👇 Select an option below:",
             reply_markup=main_menu_keyboard()
         )
 
-    logger.info("📡 Polling started...")
+    logger.info("📡 Polling started. Bot is now running...")
     await dp.start_polling(bot)
 
 
 # ─────────────────────────────────────────────
-# ⏹️ اجرای مستقیم فایل
+# ⏹️ Run bot when script is executed directly
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.warning("⛔ Bot stopped manually.")
+        logger.warning("🛑 Bot stopped manually.")
