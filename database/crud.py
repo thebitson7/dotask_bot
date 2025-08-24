@@ -1,5 +1,3 @@
-# database/crud.py
-
 from typing import Optional, List
 from datetime import datetime
 
@@ -91,10 +89,14 @@ async def create_task(
     content: str,
     due_date: Optional[datetime] = None
 ) -> Optional[Task]:
+    if not content or len(content.strip()) < 2:
+        logger.warning(f"[⚠️ INVALID CONTENT] user_id={user_id} -> content is empty or invalid.")
+        return None
+
     try:
         task = Task(
             user_id=user_id,
-            content=content,
+            content=content.strip(),
             due_date=due_date,
             is_done=False
         )
@@ -123,7 +125,7 @@ async def get_tasks_by_user_id(
             .order_by(Task.created_at.desc())
         )
         tasks = result.scalars().all()
-        logger.info(f"[📦 TASKS FETCHED] user_id={user_id}, count={len(tasks)}")
+        logger.debug(f"[📦 TASKS FETCHED] user_id={user_id}, count={len(tasks)}")
         return tasks
     except SQLAlchemyError as e:
         logger.exception(f"[❌ DB ERROR] get_tasks_by_user_id -> user_id={user_id}, {e}")
@@ -165,6 +167,8 @@ async def mark_task_as_done(
         await session.rollback()
         logger.exception(f"[❌ DB ERROR] mark_task_as_done -> task_id={task_id}, {e}")
         return None
+
+
 # ───────────────────────────────────────────────
 # 🗑 حذف تسک بر اساس شناسه
 # ───────────────────────────────────────────────
@@ -173,9 +177,6 @@ async def delete_task_by_id(
     user_id: int,
     task_id: int
 ) -> bool:
-    """
-    حذف تسکی که متعلق به کاربر و دارای شناسه مشخص است.
-    """
     try:
         result = await session.execute(
             select(Task).where(Task.id == task_id, Task.user_id == user_id)

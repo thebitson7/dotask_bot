@@ -1,5 +1,3 @@
-# bot/handlers/menu.py
-
 from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -51,18 +49,25 @@ async def handle_list_tasks(message: Message):
                 return
 
             for idx, task in enumerate(tasks, start=1):
-                due_text = f"⏰ {task.due_date.date()}" if task.due_date else "🕓 بدون تاریخ"
+                # ایمن‌سازی نمایش تاریخ
+                try:
+                    due_text = f"⏰ {task.due_date.strftime('%Y-%m-%d')}" if task.due_date else "🕓 بدون تاریخ"
+                except Exception:
+                    due_text = "🕓 تاریخ نامعتبر"
+
                 status_text = "✅ انجام شده" if task.is_done else "🕒 در انتظار"
+                content = task.content or "❓ بدون عنوان"
 
                 message_text = (
-                    f"<b>{idx}.</b> {task.content}\n"
+                    f"<b>{idx}.</b> {content}\n"
                     f"{due_text} | {status_text}"
                 )
 
-                # فقط تسک‌های ناتمام دکمه حذف و انجام دارند
+                # فقط تسک‌های ناتمام دکمه دارند
                 reply_markup = get_task_inline_keyboard(task.id) if not task.is_done else None
 
                 await message.answer(message_text, reply_markup=reply_markup)
+                logger.debug(f"[📄 TASK SHOWN] user_id={user_id}, task_id={task.id}")
 
             await message.answer("🔙 برگشت به منوی اصلی:", reply_markup=main_menu_keyboard())
 
