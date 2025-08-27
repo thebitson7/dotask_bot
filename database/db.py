@@ -2,6 +2,7 @@
 
 from typing import AsyncGenerator
 from contextlib import asynccontextmanager
+import logging
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -13,31 +14,32 @@ from sqlalchemy.exc import SQLAlchemyError
 from core.config import get_settings
 from database.models import Base
 
-import logging
 
-
-# ─────────────────────────────
-# 🔧 Configuration & Logging
-# ─────────────────────────────
+# ──────────────────────────────────────────────
+# ⚙️ Configuration & Logging Setup
+# ──────────────────────────────────────────────
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# 🔧 Determine if we log SQL queries (only in dev)
+SQL_ECHO = settings.ENV.lower() == "development"
 
-# ─────────────────────────────
-# ⚙️ Engine Setup
-# ─────────────────────────────
+
+# ──────────────────────────────────────────────
+# 🚀 SQLAlchemy Async Engine
+# ──────────────────────────────────────────────
 engine = create_async_engine(
     settings.DB_URL,
-    echo=(settings.ENV == "development"),
+    echo=SQL_ECHO,
     pool_size=10,
     max_overflow=20,
     future=True
 )
 
 
-# ─────────────────────────────
-# 🧪 Session Factory
-# ─────────────────────────────
+# ──────────────────────────────────────────────
+# 🧪 Async Session Factory
+# ──────────────────────────────────────────────
 AsyncSessionFactory = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -45,42 +47,48 @@ AsyncSessionFactory = async_sessionmaker(
 )
 
 
-# ─────────────────────────────
-# 🎯 Async Context Session
-# ─────────────────────────────
+# ──────────────────────────────────────────────
+# 📦 Async Session Context Manager
+# ──────────────────────────────────────────────
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """
-    Provides an async SQLAlchemy session with safe rollback & cleanup.
+    Provides an async SQLAlchemy session with rollback safety.
     """
     async with AsyncSessionFactory() as session:
         try:
             yield session
         except SQLAlchemyError as e:
             await session.rollback()
-            logger.exception(f"[❌ DB] Rollback due to error: {e}")
+            logger.exception(f"[DB] ❌ Session rollback due to error: {e}")
             raise
         finally:
             await session.close()
 
 
-# ─────────────────────────────
-# 🏗️ Database Initialization
-# ─────────────────────────────
+# ──────────────────────────────────────────────
+# 🏗️ Initialize All Tables (Run Once)
+# ──────────────────────────────────────────────
 async def init_db() -> None:
     """
-    Initializes database & creates all tables from models.
+    Initializes the database by creating all tables from models.
+    Should be called on startup.
     """
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("✅ Database initialized successfully.")
     except SQLAlchemyError as e:
-        logger.exception("❌ Failed to initialize the database.")
+        logger.exception("❌ Database initialization failed.")
         raise
 
 
-# ─────────────────────────────
-# 📦 Exports
-# ─────────────────────────────
-__all__ = ["get_session", "init_db", "engine", "AsyncSessionFactory"]
+# ──────────────────────────────────────────────
+# ✨ Exports for External Usage
+# ──────────────────────────────────────────────
+__all__ = [
+    "get_session",
+    "init_db",
+    "engine",
+    "AsyncSessionFactory"
+]
