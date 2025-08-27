@@ -1,11 +1,13 @@
 from typing import AsyncGenerator
 from contextlib import asynccontextmanager
+
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     create_async_engine,
     async_sessionmaker,
 )
 from sqlalchemy.exc import SQLAlchemyError
+
 from core.config import get_settings
 from database.models import Base
 import logging
@@ -20,13 +22,10 @@ engine = create_async_engine(
     settings.DB_URL,
     echo=(settings.ENV == "development"),
     future=True,
-    # فقط برای PostgreSQL لازم است
-    # pool_size=5,
-    # max_overflow=10
 )
 
 # ─────────────────────────────────────
-# 🧪 Session Maker
+# 🧪 ساخت SessionFactory
 # ─────────────────────────────────────
 AsyncSessionFactory = async_sessionmaker(
     bind=engine,
@@ -49,9 +48,8 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         finally:
             await session.close()
 
-
 # ─────────────────────────────────────
-# 🏗️ راه‌اندازی دیتابیس (ساخت جداول)
+# 🏗️ راه‌اندازی دیتابیس (ایجاد جداول)
 # ─────────────────────────────────────
 async def init_db() -> None:
     try:

@@ -46,15 +46,15 @@ async def confirm_delete(callback: CallbackQuery) -> None:
         return
 
     try:
-        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.edit_reply_markup(reply_markup=None)  # حذف کیبورد قبلی
         await callback.message.answer(
-            "❓ آیا از حذف این تسک مطمئنی؟",
+            "❓ آیا از حذف این تسک مطمئن هستید؟",
             reply_markup=create_delete_confirmation_keyboard(task_id)
         )
         await callback.answer()
     except Exception as e:
         logger.exception(f"[💥 ERROR @ confirm_delete] user={user_id} -> {e}")
-        await callback.answer("⚠️ مشکلی پیش آمد. لطفاً دوباره امتحان کن.", show_alert=True)
+        await callback.answer("⚠️ مشکلی در نمایش تاییدیه حذف رخ داد.", show_alert=True)
 
 
 # ───────────────────────────────────────────────────────────────
@@ -82,15 +82,15 @@ async def handle_confirm_delete(callback: CallbackQuery) -> None:
             )
 
             if not user:
-                logger.warning(f"[❌ USER NOT FOUND] telegram_id={user_id}")
-                await callback.answer("❗ حساب شما پیدا نشد. لطفاً /start را بزن.", show_alert=True)
+                logger.error(f"[❌ USER NOT FOUND] telegram_id={user_id}")
+                await callback.answer("❗ حساب کاربری پیدا نشد. لطفاً /start را بزنید.", show_alert=True)
                 return
 
             deleted = await delete_task_by_id(session, user_id=user.id, task_id=task_id)
 
             if not deleted:
                 logger.warning(f"[⚠️ DELETE FAILED] user_id={user_id}, task_id={task_id}")
-                await callback.answer("❌ تسک یافت نشد یا قابل حذف نیست.", show_alert=True)
+                await callback.answer("❌ تسک یافت نشد یا قبلاً حذف شده.", show_alert=True)
                 return
 
             logger.info(f"[🗑️ TASK DELETED] user_id={user_id}, task_id={task_id}")
@@ -108,8 +108,8 @@ async def handle_confirm_delete(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "cancel_delete")
 async def cancel_delete(callback: CallbackQuery) -> None:
     try:
-        await callback.message.delete()
+        await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("❌ عملیات حذف لغو شد.")
     except Exception as e:
         logger.warning(f"[⚠️ CANCEL DELETE FAILED] user_id={callback.from_user.id} -> {e}")
-        await callback.answer("⚠️ مشکلی در لغو رخ داد.")
+        await callback.answer("⚠️ مشکلی در لغو عملیات رخ داد.")

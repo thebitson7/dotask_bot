@@ -1,11 +1,11 @@
 from aiogram import Router, F
-from aiogram.types import Message, InlineKeyboardMarkup
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import InlineKeyboardButton
 
 from bot.keyboards.main_menu import main_menu_keyboard
 from database.session import get_session
 from database.crud import get_tasks_by_user_id, create_or_update_user
+
 import logging
 
 router = Router()
@@ -24,18 +24,16 @@ async def ensure_user_exists(session, user_data) -> int | None:
             username=user_data.username,
             language=user_data.language_code or "fa"
         )
-        if user:
-            return user.id
-        else:
+        if not user:
             logger.warning(f"[❗ USER NOT FOUND] telegram_id={user_data.id}")
-            return None
+        return user.id if user else None
     except Exception as e:
-        logger.exception(f"[💥 USER CREATE/GET FAILED] user={user_data.id} -> {e}")
+        logger.exception(f"[💥 USER GET/CREATE ERROR] user_id={user_data.id} -> {e}")
         return None
 
 
 # ─────────────────────────────────────────────
-# 🎛️ ساخت کیبورد اینلاین برای تسک‌ها
+# 🎛️ ساخت کیبورد تسک (انجام / حذف)
 # ─────────────────────────────────────────────
 def get_task_inline_keyboard(task_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -47,19 +45,19 @@ def get_task_inline_keyboard(task_id: int) -> InlineKeyboardMarkup:
 
 
 # ─────────────────────────────────────────────
-# 📋 نمایش لیست تسک‌ها برای کاربر
+# 📋 نمایش لیست تسک‌ها به کاربر
 # ─────────────────────────────────────────────
 @router.message(F.text == "📋 لیست وظایف")
 async def handle_list_tasks(message: Message) -> None:
     user_info = message.from_user
-    logger.info(f"[📋 LIST_TASKS] user={user_info.id} requested task list.")
+    logger.info(f"[📋 LIST TASKS REQUESTED] user_id={user_info.id}")
 
     async with get_session() as session:
         try:
             user_id = await ensure_user_exists(session, user_info)
 
             if not user_id:
-                await message.answer("❗ حساب کاربری شناسایی نشد. لطفاً ابتدا /start را بزنید.")
+                await message.answer("❗ حساب شما شناسایی نشد. لطفاً /start را بزنید.")
                 return
 
             tasks = await get_tasks_by_user_id(session, user_id=user_id)
@@ -79,13 +77,14 @@ async def handle_list_tasks(message: Message) -> None:
 
 
 # ─────────────────────────────────────────────
-# 🧠 ارسال هر تسک به کاربر (تابع کمکی)
+# 🧠 ارسال تسک به صورت جداگانه به کاربر
 # ─────────────────────────────────────────────
 async def _send_task_to_user(message: Message, task, index: int) -> None:
     try:
         due_text = f"⏰ {task.due_date.strftime('%Y-%m-%d')}" if task.due_date else "🕓 بدون تاریخ"
-    except Exception:
+    except Exception as e:
         due_text = "🕓 تاریخ نامعتبر"
+        logger.warning(f"[⚠️ INVALID DATE FORMAT] task_id={task.id} -> {e}")
 
     status_text = "✅ انجام شده" if task.is_done else "🕒 در انتظار"
     content = task.content or "❓ بدون عنوان"
@@ -99,6 +98,6 @@ async def _send_task_to_user(message: Message, task, index: int) -> None:
 
     try:
         await message.answer(text, reply_markup=markup)
-        logger.debug(f"[📄 TASK SHOWN] task_id={task.id}, user_id={message.from_user.id}")
+        logger.debug(f"[📄 TASK SENT] task_id={task.id}, user_id={message.from_user.id}")
     except Exception as e:
-        logger.warning(f"[⚠️ SEND TASK FAILED] task_id={task.id} -> {e}")
+        logger.warning(f"[⚠️ FAILED TO SEND TASK] task_id={task.id} -> {e}")

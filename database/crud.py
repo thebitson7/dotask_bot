@@ -90,14 +90,14 @@ async def create_task(
 ) -> Optional[Task]:
     try:
         content = content.strip()
-        if len(content) < 2:
-            logger.warning(f"[⚠️ INVALID CONTENT] user_id={user_id} -> Content too short.")
+        if not content or len(content) < 3:
+            logger.warning(f"[⚠️ INVALID CONTENT] user_id={user_id} -> Content too short or empty.")
             return None
 
         if isinstance(priority, str):
             try:
-                priority = TaskPriority(priority.lower())
-            except ValueError:
+                priority = TaskPriority[priority.upper()]
+            except KeyError:
                 logger.warning(f"[⚠️ INVALID PRIORITY] user_id={user_id}, priority={priority}")
                 priority = TaskPriority.MEDIUM
 
