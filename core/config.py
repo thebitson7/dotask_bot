@@ -1,53 +1,55 @@
 # core/config.py
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """
-    🔧 Global Project Configuration
-    Load all settings from `.env` file or system environment variables.
+    🔧 Global Configuration for the Project
+    Reads from .env file and environment variables.
     """
 
-    # ─── Telegram Bot ───────────────
-    BOT_TOKEN: str  # 🔐 REQUIRED: Telegram Bot API token
+    # ───────────── Telegram ─────────────
+    BOT_TOKEN: str  # 🔐 REQUIRED: Telegram Bot Token
 
-    # ─── Database Config ────────────
-    DB_URL: str = "sqlite+aiosqlite:///db.sqlite3"  # ✅ Default to local SQLite (dev/test)
+    # ───────────── Database ─────────────
+    DB_URL: str = "sqlite+aiosqlite:///db.sqlite3"  # 💾 Default: local SQLite
 
-    # ─── Environment & Debug ────────
+    # ───────────── Environment ─────────────
     ENV: str = "development"  # Options: development | production | test
     DEBUG: bool = False
 
-    # ─── Localization ───────────────
+    # ───────────── Localization ─────────────
     DEFAULT_LANG: str = "fa"
     TZ: str = "Asia/Tehran"
 
-    # ─── Model Config ───────────────
+    # ───────────── Pydantic Meta ─────────────
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore"
+        extra="ignore"  # ⛑ Ignore unknown env vars
     )
 
+    # ───────────── Helper Flags ─────────────
     @property
     def is_dev(self) -> bool:
-        return self.ENV == "development"
+        return self.ENV.lower() == "development"
 
     @property
     def is_prod(self) -> bool:
-        return self.ENV == "production"
+        return self.ENV.lower() == "production"
 
     @property
     def is_test(self) -> bool:
-        return self.ENV == "test"
+        return self.ENV.lower() == "test"
 
 
+# ───────────── Singleton for Global Access ─────────────
 @lru_cache()
 def get_settings() -> Settings:
     """
-    📦 Cached Singleton to access settings globally.
-    Use `get_settings()` anywhere in the app to fetch current config.
+    📦 Global cached config.
+    Usage: settings = get_settings()
     """
     return Settings()

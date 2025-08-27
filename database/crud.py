@@ -5,15 +5,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import User, Task
+from database.models import User, Task, TaskPriority
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-# ───────────────────────────────────────────────
+# ─────────────────────────────
 # 👤 دریافت کاربر با آیدی تلگرام
-# ───────────────────────────────────────────────
+# ─────────────────────────────
 async def get_user_by_telegram_id(
     session: AsyncSession,
     telegram_id: int
@@ -22,18 +22,15 @@ async def get_user_by_telegram_id(
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
-        user = result.scalars().first()
-        if not user:
-            logger.info(f"[ℹ️ USER NOT FOUND] telegram_id={telegram_id}")
-        return user
+        return result.scalars().first()
     except SQLAlchemyError as e:
-        logger.exception(f"[❌ DB ERROR] get_user_by_telegram_id -> {e}")
+        logger.exception(f"[❌ DB ERROR] get_user_by_telegram_id(telegram_id={telegram_id}) -> {e}")
         return None
 
 
-# ───────────────────────────────────────────────
+# ─────────────────────────────
 # ✅ ایجاد یا بروزرسانی کاربر
-# ───────────────────────────────────────────────
+# ─────────────────────────────
 async def create_or_update_user(
     session: AsyncSession,
     telegram_id: int,
@@ -60,12 +57,13 @@ async def create_or_update_user(
                 await session.commit()
                 await session.refresh(user)
                 logger.info(f"[🔄 USER UPDATED] telegram_id={telegram_id}")
+
         else:
             user = User(
                 telegram_id=telegram_id,
-                full_name=full_name,
-                username=username,
-                language=language
+                full_name=full_name or "بدون‌نام",
+                username=username or "",
+                language=language or "fa"
             )
             session.add(user)
             await session.commit()
@@ -76,28 +74,38 @@ async def create_or_update_user(
 
     except SQLAlchemyError as e:
         await session.rollback()
-        logger.exception(f"[❌ DB ERROR] create_or_update_user -> {e}")
+        logger.exception(f"[❌ DB ERROR] create_or_update_user(telegram_id={telegram_id}) -> {e}")
         return None
 
 
-# ───────────────────────────────────────────────
+# ─────────────────────────────
 # 📝 ایجاد تسک جدید
-# ───────────────────────────────────────────────
+# ─────────────────────────────
 async def create_task(
     session: AsyncSession,
     user_id: int,
     content: str,
-    due_date: Optional[datetime] = None
+    due_date: Optional[datetime] = None,
+    priority: TaskPriority | str = TaskPriority.MEDIUM
 ) -> Optional[Task]:
-    if not content or len(content.strip()) < 2:
-        logger.warning(f"[⚠️ INVALID CONTENT] user_id={user_id} -> content is empty or invalid.")
-        return None
-
     try:
+        content = content.strip()
+        if not content or len(content) < 3:
+            logger.warning(f"[⚠️ INVALID CONTENT] user_id={user_id} -> Content too short or empty.")
+            return None
+
+        if isinstance(priority, str):
+            try:
+                priority = TaskPriority[priority.upper()]
+            except KeyError:
+                logger.warning(f"[⚠️ INVALID PRIORITY] user_id={user_id}, priority={priority}")
+                priority = TaskPriority.MEDIUM
+
         task = Task(
             user_id=user_id,
-            content=content.strip(),
+            content=content,
             due_date=due_date,
+            priority=priority,
             is_done=False
         )
         session.add(task)
@@ -105,36 +113,45 @@ async def create_task(
         await session.refresh(task)
         logger.info(f"[✅ TASK CREATED] user_id={user_id}, task_id={task.id}")
         return task
+
     except SQLAlchemyError as e:
         await session.rollback()
-        logger.exception(f"[❌ DB ERROR] create_task -> user_id={user_id}, {e}")
+        logger.exception(f"[❌ DB ERROR] create_task(user_id={user_id}) -> {e}")
         return None
 
 
-# ───────────────────────────────────────────────
-# 📋 دریافت تسک‌های کاربر
-# ───────────────────────────────────────────────
+# ─────────────────────────────
+# 📋 دریافت لیست تسک‌ها
+# ─────────────────────────────
 async def get_tasks_by_user_id(
     session: AsyncSession,
-    user_id: int
+    user_id: int,
+    only_pending: bool = False,
+    priority: Optional[TaskPriority] = None
 ) -> List[Task]:
     try:
-        result = await session.execute(
-            select(Task)
-            .where(Task.user_id == user_id)
-            .order_by(Task.created_at.desc())
-        )
+        query = select(Task).where(Task.user_id == user_id)
+
+        if only_pending:
+            query = query.where(Task.is_done.is_(False))
+        if priority:
+            query = query.where(Task.priority == priority)
+
+        query = query.order_by(Task.created_at.desc())
+        result = await session.execute(query)
         tasks = result.scalars().all()
+
         logger.debug(f"[📦 TASKS FETCHED] user_id={user_id}, count={len(tasks)}")
         return tasks
+
     except SQLAlchemyError as e:
-        logger.exception(f"[❌ DB ERROR] get_tasks_by_user_id -> user_id={user_id}, {e}")
+        logger.exception(f"[❌ DB ERROR] get_tasks_by_user_id(user_id={user_id}) -> {e}")
         return []
 
 
-# ───────────────────────────────────────────────
-# ✅ علامت‌گذاری تسک به‌عنوان انجام‌شده
-# ───────────────────────────────────────────────
+# ─────────────────────────────
+# ✅ علامت‌گذاری تسک به عنوان انجام شده
+# ─────────────────────────────
 async def mark_task_as_done(
     session: AsyncSession,
     user_id: int,
@@ -142,8 +159,7 @@ async def mark_task_as_done(
 ) -> Optional[Task]:
     try:
         result = await session.execute(
-            select(Task)
-            .where(Task.id == task_id, Task.user_id == user_id)
+            select(Task).where(Task.id == task_id, Task.user_id == user_id)
         )
         task = result.scalars().first()
 
@@ -165,13 +181,13 @@ async def mark_task_as_done(
 
     except SQLAlchemyError as e:
         await session.rollback()
-        logger.exception(f"[❌ DB ERROR] mark_task_as_done -> task_id={task_id}, {e}")
+        logger.exception(f"[❌ DB ERROR] mark_task_as_done(task_id={task_id}) -> {e}")
         return None
 
 
-# ───────────────────────────────────────────────
-# 🗑 حذف تسک بر اساس شناسه
-# ───────────────────────────────────────────────
+# ─────────────────────────────
+# 🗑 حذف تسک
+# ─────────────────────────────
 async def delete_task_by_id(
     session: AsyncSession,
     user_id: int,
@@ -184,7 +200,7 @@ async def delete_task_by_id(
         task = result.scalars().first()
 
         if not task:
-            logger.warning(f"[⚠️ TASK NOT FOUND] Cannot delete: task_id={task_id}, user_id={user_id}")
+            logger.warning(f"[⚠️ TASK NOT FOUND] task_id={task_id}, user_id={user_id}")
             return False
 
         await session.delete(task)
@@ -194,5 +210,5 @@ async def delete_task_by_id(
 
     except SQLAlchemyError as e:
         await session.rollback()
-        logger.exception(f"[❌ DB ERROR] delete_task_by_id -> task_id={task_id}, user_id={user_id}, {e}")
+        logger.exception(f"[❌ DB ERROR] delete_task_by_id(task_id={task_id}) -> {e}")
         return False
