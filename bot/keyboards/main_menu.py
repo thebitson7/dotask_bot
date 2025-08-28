@@ -1,42 +1,33 @@
-# bot/keyboards/main_menu.py
-
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-
-# ─────────────────────────────────────────────
-# 🎛 دکمه‌های اصلی به صورت ثابت
-# برای چندزبانه بودن، بهتر است از فایل locale خوانده شود.
-# ─────────────────────────────────────────────
 class MainMenuButtons:
     ADD_TASK = "➕ افزودن تسک"
     LIST_TASKS = "📋 لیست وظایف"
     SETTINGS = "⚙️ تنظیمات"
     HELP = "ℹ️ راهنما"
 
+# alias برای چند زبان/بدون ایموجی
+ADD_TASK_ALIASES = {
+    MainMenuButtons.ADD_TASK,
+    "افزودن تسک", "تسک جدید", "add task", "new task", "add",
+}
+LIST_TASKS_ALIASES = {
+    MainMenuButtons.LIST_TASKS,
+    "لیست وظایف", "لیست تسک‌ها", "tasks", "my tasks", "list tasks",
+}
+SETTINGS_ALIASES = {MainMenuButtons.SETTINGS, "settings", "تنظیمات"}
+HELP_ALIASES = {MainMenuButtons.HELP, "help", "راهنما"}
 
-# ─────────────────────────────────────────────
-# 🧱 ساختار کیبورد منوی اصلی
-# ─────────────────────────────────────────────
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """
-    📲 تولید کیبورد اصلی با چیدمان دو سطری:
-    ➤ قابل استفاده در /start و بازگشت به منو
-    """
-
     layout = [
-        [
-            KeyboardButton(text=MainMenuButtons.ADD_TASK),
-            KeyboardButton(text=MainMenuButtons.LIST_TASKS)
-        ],
-        [
-            KeyboardButton(text=MainMenuButtons.SETTINGS),
-            KeyboardButton(text=MainMenuButtons.HELP)
-        ]
+        [KeyboardButton(text=MainMenuButtons.ADD_TASK),
+         KeyboardButton(text=MainMenuButtons.LIST_TASKS)],
+        [KeyboardButton(text=MainMenuButtons.SETTINGS),
+         KeyboardButton(text=MainMenuButtons.HELP)],
     ]
-
     return ReplyKeyboardMarkup(
         keyboard=layout,
         resize_keyboard=True,
         one_time_keyboard=False,
-        input_field_placeholder="🔘 لطفاً یکی از گزینه‌ها را انتخاب کن..."
+        input_field_placeholder="🔘 لطفاً یکی از گزینه‌ها را انتخاب کن…",
     )

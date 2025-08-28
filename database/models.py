@@ -1,31 +1,52 @@
-from datetime import datetime
-from typing import Optional, List
-import sys
-from enum import Enum, auto
+# database/models.py
+from __future__ import annotations
 
-# ✔️ پشتیبانی از StrEnum در Python 3.10
+import sys
+from datetime import datetime
+from typing import List, Optional
+
+# ---- StrEnum compatibility (Py3.10+) ----
 if sys.version_info >= (3, 11):
     from enum import StrEnum
 else:
-    class StrEnum(str, Enum):
-        pass
+    from enum import Enum
+
+    class StrEnum(str, Enum):  # type: ignore[no-redef]
+        def __str__(self) -> str:  # nicer repr/str
+            return self.value
 
 from sqlalchemy import (
-    String, DateTime, Boolean,
-    ForeignKey, Index, func,
-    Enum as SqlEnum
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum as SqlEnum,
+    ForeignKey,
+    Index,
+    MetaData,
+    String,
+    func,
 )
-from sqlalchemy.orm import (
-    DeclarativeBase, Mapped,
-    mapped_column, relationship
-)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.ext.hybrid import hybrid_property
+
 
 # ─────────────────────────────────────
-# 🧱 Declarative Base
+# 🧱 Declarative Base + naming conventions
 # ─────────────────────────────────────
+_naming = MetaData(
+    naming_convention={
+        "ix": "ix_%(table_name)s_%(column_0_name)s",
+        "uq": "uq_%(table_name)s_%(column_0_name)s",
+        "ck": "ck_%(table_name)s_%(constraint_name)s",
+        "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+        "pk": "pk_%(table_name)s",
+    }
+)
+
+
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy ORM models."""
-    pass
+    metadata = _naming
 
 
 # ─────────────────────────────────────
@@ -33,98 +54,165 @@ class Base(DeclarativeBase):
 # ─────────────────────────────────────
 class TaskPriority(StrEnum):
     """Priority levels for a Task."""
-    HIGH = auto()
-    MEDIUM = auto()
-    LOW = auto()
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+    @classmethod
+    def default(cls) -> "TaskPriority":
+        return cls.MEDIUM
 
 
 # ─────────────────────────────────────
 # 👤 User Model
 # ─────────────────────────────────────
 class User(Base):
-    """
-    Represents a Telegram user.
-    """
+    """Represents a Telegram user."""
     __tablename__ = "users"
     __table_args__ = (
         Index("idx_users_telegram_id", "telegram_id"),
+        {"comment": "Telegram users table"},
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    telegram_id: Mapped[int] = mapped_column(unique=True, nullable=False)
-    full_name: Mapped[Optional[str]] = mapped_column(String(100))
-    username: Mapped[Optional[str]] = mapped_column(String(50))
-    language: Mapped[str] = mapped_column(String(10), default="fa", nullable=False)
+    telegram_id: Mapped[int] = mapped_column(unique=True, nullable=False, comment="Telegram user id")
+    full_name: Mapped[Optional[str]] = mapped_column(String(100), comment="Display/full name")
+    username: Mapped[Optional[str]] = mapped_column(String(50), comment="Telegram @username")
+    language: Mapped[str] = mapped_column(String(10), default="fa", nullable=False, comment="Preferred language")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        nullable=False
+        nullable=False,
+        comment="Creation timestamp (UTC)",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+        comment="Last update timestamp (UTC)",
     )
 
     # 🔗 Relation to tasks
     tasks: Mapped[List["Task"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin"
+        lazy="selectin",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:
         return (
-            f"<User(id={self.id}, telegram_id={self.telegram_id}, "
-            f"username='{self.username}', full_name='{self.full_name}')>"
+            f"<User id={self.id} tg={self.telegram_id} "
+            f"username={self.username!r} name={self.full_name!r}>"
         )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "telegram_id": self.telegram_id,
+            "username": self.username,
+            "full_name": self.full_name,
+            "language": self.language,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
 
 
 # ─────────────────────────────────────
 # ✅ Task Model
 # ─────────────────────────────────────
 class Task(Base):
-    """
-    Represents a task created by a user.
-    """
+    """Represents a task created by a user."""
     __tablename__ = "tasks"
     __table_args__ = (
+        # پرکاربرد: فیلتر بر اساس کاربر و وضعیت
         Index("idx_tasks_user_status", "user_id", "is_done"),
+        # مرتب‌سازی لیست‌ها به صورت جدیدترین اول
+        Index("idx_tasks_user_created", "user_id", "created_at"),
+        # فیلترها:
         Index("idx_tasks_due_date", "due_date"),
         Index("idx_tasks_priority", "priority"),
+        # قیود کیفیت داده:
+        CheckConstraint(func.length("content") >= 3, name="tasks_content_minlen"),
+        CheckConstraint("(done_at IS NULL) OR (is_done = 1)", name="tasks_done_at_consistency"),
+        {"comment": "Tasks created by users"},
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False
+        nullable=False,
+        index=True,
+        comment="Owner user id",
     )
-    content: Mapped[str] = mapped_column(String(255), nullable=False)
-    due_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    content: Mapped[str] = mapped_column(String(255), nullable=False, comment="Task content (<=255 chars)")
+    due_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), comment="Optional due date (UTC)")
 
-    # 🎯 Priority Enum
+    # 🎯 Priority Enum (native Postgres enum; strings elsewhere)
     priority: Mapped[TaskPriority] = mapped_column(
-        SqlEnum(
-            TaskPriority,
-            name="task_priority_enum",
-            validate_strings=True
-        ),
-        default=TaskPriority.MEDIUM,
-        nullable=False
+        SqlEnum(TaskPriority, name="task_priority_enum", validate_strings=True),
+        default=TaskPriority.default,
+        nullable=False,
+        comment="Task priority",
     )
 
-    is_done: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_done: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, comment="Completion flag")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        nullable=False
+        nullable=False,
+        comment="Creation timestamp (UTC)",
     )
-    done_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+        comment="Last update timestamp (UTC)",
+    )
+    done_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), comment="When marked done (UTC)")
 
+    # 🔗 Relationship
     user: Mapped["User"] = relationship(
         back_populates="tasks",
-        lazy="selectin"
+        lazy="selectin",
+        passive_deletes=True,
     )
 
+    # ── Hybrid helpers ───────────────────
+    @hybrid_property
+    def overdue(self) -> bool:
+        """
+        True if task has a due_date in the past and is not done.
+        (مقدار دقیق DB-side را می‌توان با expression هم تعریف کرد، اینجا client-side کافی است)
+        """
+        if self.is_done or self.due_date is None:
+            return False
+        # اینجا فقط مقایسه‌ی naive/aware را به عهده‌ی DB گذاشتیم؛
+        # پیشنهاد: همه تاریخ‌ها UTC-aware باشند (هستند).
+        return self.due_date < datetime.utcnow().astimezone(self.due_date.tzinfo)
+
+    @property
+    def status(self) -> str:
+        return "DONE" if self.is_done else "PENDING"
+
     def __repr__(self) -> str:
-        content_preview = self.content[:20] + "..." if self.content else "❓"
+        content_preview = (self.content[:20] + "…") if self.content else "❓"
         return (
-            f"<Task(id={self.id}, user_id={self.user_id}, "
-            f"priority='{self.priority}', status={'✅' if self.is_done else '⏳'}, "
-            f"due_date={self.due_date}, content='{content_preview}')>"
+            f"<Task id={self.id} user_id={self.user_id} prio={self.priority} "
+            f"status={'✅' if self.is_done else '⏳'} due={self.due_date} content={content_preview!r}>"
         )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "content": self.content,
+            "priority": str(self.priority),
+            "is_done": self.is_done,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "due_date": self.due_date.isoformat() if self.due_date else None,
+            "done_at": self.done_at.isoformat() if self.done_at else None,
+        }

@@ -1,94 +1,45 @@
 # database/db.py
+"""
+Compatibility shim to avoid duplication with `database/session.py`.
 
-from typing import AsyncGenerator
-from contextlib import asynccontextmanager
+This module re-exports the canonical Engine/Session utilities from
+`database.session` so existing imports keep working:
+
+    from database.db import get_session, init_db
+"""
+
+from __future__ import annotations
+
 import logging
+from functools import lru_cache
 
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine
-)
-from sqlalchemy.exc import SQLAlchemyError
-
-from core.config import get_settings
-from database.models import Base
-
-
-# ──────────────────────────────────────────────
-# ⚙️ Configuration & Logging Setup
-# ──────────────────────────────────────────────
-logger = logging.getLogger(__name__)
-settings = get_settings()
-
-# 🔧 Determine if we log SQL queries (only in dev)
-SQL_ECHO = settings.ENV.lower() == "development"
-
-
-# ──────────────────────────────────────────────
-# 🚀 SQLAlchemy Async Engine
-# ──────────────────────────────────────────────
-engine = create_async_engine(
-    settings.DB_URL,
-    echo=SQL_ECHO,
-    pool_size=10,
-    max_overflow=20,
-    future=True
+# Re-export canonical APIs from the single source of truth
+from database.session import (  # noqa: F401
+    AsyncSessionFactory,
+    engine,
+    get_session,
+    transactional_session,
+    init_db,
+    shutdown_db,
 )
 
-
-# ──────────────────────────────────────────────
-# 🧪 Async Session Factory
-# ──────────────────────────────────────────────
-AsyncSessionFactory = async_sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    expire_on_commit=False
-)
-
-
-# ──────────────────────────────────────────────
-# 📦 Async Session Context Manager
-# ──────────────────────────────────────────────
-@asynccontextmanager
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """
-    Provides an async SQLAlchemy session with rollback safety.
-    """
-    async with AsyncSessionFactory() as session:
-        try:
-            yield session
-        except SQLAlchemyError as e:
-            await session.rollback()
-            logger.exception(f"[DB] ❌ Session rollback due to error: {e}")
-            raise
-        finally:
-            await session.close()
-
-
-# ──────────────────────────────────────────────
-# 🏗️ Initialize All Tables (Run Once)
-# ──────────────────────────────────────────────
-async def init_db() -> None:
-    """
-    Initializes the database by creating all tables from models.
-    Should be called on startup.
-    """
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("✅ Database initialized successfully.")
-    except SQLAlchemyError as e:
-        logger.exception("❌ Database initialization failed.")
-        raise
-
-
-# ──────────────────────────────────────────────
-# ✨ Exports for External Usage
-# ──────────────────────────────────────────────
 __all__ = [
-    "get_session",
-    "init_db",
     "engine",
-    "AsyncSessionFactory"
+    "AsyncSessionFactory",
+    "get_session",
+    "transactional_session",
+    "init_db",
+    "shutdown_db",
 ]
+
+
+@lru_cache(maxsize=1)
+def _warn_once() -> None:
+    logging.getLogger(__name__).warning(
+        "⚠️ `database.db` is deprecated. Use `database.session` instead. "
+        "This module is a compatibility shim and will be removed in a future release."
+    )
+
+
+# Emit deprecation warning once on import
+_warn_once()
