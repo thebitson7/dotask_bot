@@ -6,7 +6,7 @@ import inspect
 import logging
 import signal
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from typing import Optional, Tuple, Any
+from typing import Any, Tuple
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -25,12 +25,13 @@ except Exception:  # pragma: no cover
 from core.config import get_settings
 from database.session import init_db
 
-# Routers شما — اگر فایل/نام فرق دارد اینجا اصلاح کنید
+# Routers
+logger = logging.getLogger("DoTaskStartup")
 try:
-    from bot.handlers import add_task, delete_task, mark_done, menu
+    from bot.handlers import add_task, delete_task, mark_done, menu, list_tasks
     from bot.handlers import start as start_handler
-except Exception as e:  # لاگ واضح اگر ایمپورت‌ها اشتباه باشد
-    logging.getLogger("DoTaskStartup").exception("❌ Router import failed: %s", e)
+except Exception as e:
+    logger.exception("❌ Router import failed: %s", e)
     raise
 
 # Webhook server (aiohttp) - فقط وقتی WEBHOOK_MODE=True
@@ -40,7 +41,6 @@ try:
 except Exception:  # pragma: no cover
     web = None  # type: ignore
 
-logger = logging.getLogger("DoTaskStartup")
 settings = get_settings()
 
 
@@ -53,7 +53,6 @@ async def _resolve_storage() -> Any:
     if settings.REDIS_URL and aioredis and RedisStorage:
         try:
             redis = aioredis.from_url(settings.REDIS_URL, decode_responses=False)
-            # تست اتصال سبک
             with suppress(Exception):
                 await redis.ping()
             logger.info("🔌 Using Redis storage for FSM")
@@ -78,9 +77,10 @@ def _include_routers(dp: Dispatcher) -> None:
         add_task.router,
         mark_done.router,
         delete_task.router,
+        list_tasks.router,  # نمایش/فیلتر/صفحه‌بندی تسک‌ها
         menu.router,
     )
-    logger.debug("🧭 Routers registered: start, add_task, mark_done, delete_task, menu")
+    logger.debug("🧭 Routers registered: start, add_task, mark_done, delete_task, list_tasks, menu")
 
 
 async def _maybe_setup_bot_commands(bot: Bot) -> None:
@@ -125,7 +125,6 @@ async def _startup_common() -> Tuple[Bot, Dispatcher]:
         logger.info("🤖 Bot authorized: @%s (id=%s)", me.username, me.id)
     except Exception as e:
         logger.critical("🚫 Telegram authorization failed: %s", e, exc_info=True)
-        # بستن سشن برای تمیزی
         with suppress(Exception):
             await bot.session.close()
         raise
@@ -152,9 +151,14 @@ async def _run_polling(bot: Bot, dp: Dispatcher) -> None:
     with suppress(Exception):
         await bot.delete_webhook(drop_pending_updates=True)
 
-    # فقط آپدیت‌هایی که نیاز داریم
-    # (resolve_used_update_types گاهی روی برخی پلتفرم‌ها محدودکننده می‌شود؛ صریح مشخص می‌کنیم)
-    allowed_updates = ["message", "callback_query"]
+    # اگر Aiogram توانست تشخیص دهد، همان؛ وگرنه صریح تعیین می‌کنیم
+    try:
+        allowed_updates = dp.resolve_used_update_types()
+        if not allowed_updates:
+            raise ValueError("empty")
+    except Exception:
+        allowed_updates = ["message", "callback_query"]
+
     logger.debug("Allowed updates: %s", allowed_updates)
 
     await dp.start_polling(
@@ -217,11 +221,9 @@ async def _lifespan(bot: Bot, dp: Dispatcher):
     روی ویندوز ممکن است سیگنال‌ها محدود باشند، suppress شده‌اند.
     """
     loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
 
     def _stop_signal(signame: str):
         logger.warning("🛑 Received %s -> shutting down…", signame)
-        stop_event.set()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         with suppress(NotImplementedError):

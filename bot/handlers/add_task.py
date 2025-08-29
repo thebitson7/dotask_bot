@@ -113,6 +113,7 @@ async def _safe_answer(source: Message | CallbackQuery, text: str, **kwargs) -> 
 
 def _lang_of(user) -> str:
     """Detect user language or fallback to default."""
+    # aiogram User.language_code e.g. 'fa', 'en'
     return (getattr(user, "language_code", None) or settings.DEFAULT_LANG or "fa").lower()
 
 
@@ -220,9 +221,9 @@ async def receive_custom_date(message: Message, state: FSMContext) -> None:
         await message.answer("❗ فرمت اشتباه است. مثال: 2025-09-15 یا 2025-09-15 14:30")
         return
 
-    # جلوگیری از تاریخ گذشته (فقط تاریخ؛ اگر ساعت هم دادی، همین چک ساده کافیه)
-    if parsed.date() < _now_local().date():
-        await message.answer("⚠️ تاریخ گذشته است. لطفاً تاریخ آینده وارد کنید.")
+    # جلوگیری از تاریخ گذشته (صرفاً تاریخ/ساعت نسبت به الان محلی)
+    if parsed < _now_local():
+        await message.answer("⚠️ تاریخ/زمان گذشته است. لطفاً زمان آینده وارد کنید.")
         return
 
     await state.update_data(due_date=_to_utc(parsed))
@@ -244,10 +245,8 @@ async def handle_priority_selection(callback: CallbackQuery, state: FSMContext) 
         await callback.answer("❗ اولویت نامعتبر است.")
         return
 
-    # ذخیره به‌صورت name (HIGH/MEDIUM/LOW) در state
     await state.update_data(priority=priority.name)
 
-    # تایید انتخاب به زبان کاربر
     await callback.answer()
     await callback.message.answer(
         f"✅ اولویت انتخاب شد: {priority_label(priority, lang=_lang_of(callback.from_user))}"
@@ -264,7 +263,7 @@ async def _save_task(source: Message | CallbackQuery, state: FSMContext) -> None
     data = await state.get_data()
 
     content = data.get("content")
-    due_date_utc = data.get("due_date")  # باید datetime-aware (UTC) باشد یا None
+    due_date_utc = data.get("due_date")  # datetime-aware (UTC) یا None
     priority_str = (data.get("priority") or "MEDIUM").upper()
 
     if not content:

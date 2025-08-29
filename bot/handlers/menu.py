@@ -1,4 +1,4 @@
-# bot/handlers/menu.py  (یا فایل فعلی شما)
+# bot/handlers/menu.py
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from core.config import get_settings
 from bot.keyboards.main_menu import main_menu_keyboard
 from database.session import transactional_session, get_session
-from database.crud import get_tasks_by_user_id, create_or_update_user
+from database.crud import create_or_update_user, get_tasks_by_user_id
 from database.models import Task
 
 router = Router()
@@ -28,18 +28,25 @@ settings = get_settings()
 LOCAL_TZ = ZoneInfo(settings.TZ)
 CONTENT_MAX_INLINE = 120     # حداکثر طول نمایش متن تسک
 BATCH_SLEEP_SECONDS = 0.05   # فاصله بین پیام‌ها برای جلوگیری از Flood
-MAX_TASKS_PER_LIST = 50      # سقف تعداد پیام‌هایی که در یک لیست ارسال می‌کنیم
+MAX_TASKS_PER_LIST = 50      # سقف تعداد آیتم‌هایی که در یک بار نشان می‌دهیم
 
 PRIO_EMOJI = {
     "HIGH": "🔴",
-    "MEDIUM": "🟠",
+    "MEDIUM": "🟡",
     "LOW": "🟢",
 }
 STATUS_EMOJI = {
-    True: "✅ انجام شده",
+    True: "✅ انجام‌شده",
     False: "🕒 در انتظار",
 }
 
+# تریگرهای رایج دکمه/پیام برای نمایش لیست
+_LIST_TRIGGERS = {
+    "📋 لیست تسک‌ها",
+    "📋 نمایش تسک‌ها",
+    "📋 تسک‌ها",
+    "📋 لیست وظایف",
+}
 
 # ─────────────────────────────────────────────
 # 🔧 کمکی‌ها
@@ -54,6 +61,7 @@ def _to_local(dt: Optional[datetime]) -> Optional[datetime]:
     if dt is None:
         return None
     if dt.tzinfo is None:
+        # اگر از DB بدون tz برگشته باشد، آن را محلی فرض می‌کنیم
         return dt.replace(tzinfo=LOCAL_TZ)
     return dt.astimezone(LOCAL_TZ)
 
@@ -62,7 +70,7 @@ def _fmt_due(dt: Optional[datetime]) -> str:
     if dt is None:
         return "🕓 بدون تاریخ"
     dt = _to_local(dt)
-    # اگر ساعت صفر نیست، ساعت هم نشان بده
+    # اگر ساعت صفر نبود، ساعت را هم نشان بده
     if dt.hour or dt.minute:
         return f"⏰ {dt.strftime('%Y-%m-%d %H:%M')}"
     return f"⏰ {dt.strftime('%Y-%m-%d')}"
@@ -76,13 +84,12 @@ def _is_overdue(task: Task) -> bool:
 
 
 def _task_inline_keyboard(task_id: int, is_done: bool) -> Optional[InlineKeyboardMarkup]:
-    if is_done:
-        return None
+    # برای سادگی در منو: فقط دکمه‌های انجام و حذف (ویرایش/اسنوز در هندلر لیست حرفه‌ای موجود است)
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="✅ انجام شد", callback_data=f"done:{task_id}"),
-        InlineKeyboardButton(text="🗑 حذف", callback_data=f"delete:{task_id}"),
-    )
+    if not is_done:
+        builder.button(text="✅ انجام شد", callback_data=f"done:{task_id}")
+    builder.button(text="🗑 حذف", callback_data=f"delete:{task_id}")
+    builder.adjust(2 if not is_done else 1)
     return builder.as_markup()
 
 
@@ -92,21 +99,20 @@ def _render_task_text(task: Task, index: int) -> str:
 
     due_part = _fmt_due(task.due_date)
     status_part = STATUS_EMOJI[task.is_done]
-    prio = PRIO_EMOJI.get(str(task.priority), "⚪")
+    prio = PRIO_EMOJI.get(getattr(task.priority, "name", str(task.priority)), "⚪")
 
     badges = []
     if _is_overdue(task):
         badges.append("⚠️ سررسید گذشته")
 
     badges_text = f" | {' · '.join(badges)}" if badges else ""
-    # نمونهٔ خروجی:
+    # نمونه خروجی:
     # 1) 🔴 خرید نان
-    # ⏰ 2025-09-15 | 🕒 در انتظار | ⚠️ سررسید گذشته
+    # ⏰ 2025-09-15 12:00 | 🕒 در انتظار | ⚠️ سررسید گذشته
     return (
         f"<b>{index}) {prio} {content_show}</b>\n"
         f"{due_part} | {status_part}{badges_text}"
     )
-
 
 # ─────────────────────────────────────────────
 # ✅ اطمینان از وجود کاربر در دیتابیس
@@ -119,7 +125,7 @@ async def _ensure_user_exists(user_data) -> Optional[int]:
                 telegram_id=user_data.id,
                 full_name=user_data.full_name,
                 username=user_data.username,
-                language=user_data.language_code or settings.DEFAULT_LANG,
+                language=(user_data.language_code or settings.DEFAULT_LANG),
                 commit=False,  # اتمیک
             )
             return user.id if user else None
@@ -127,11 +133,10 @@ async def _ensure_user_exists(user_data) -> Optional[int]:
         logger.exception("💥 USER GET/CREATE ERROR user_id=%s", user_data.id)
         return None
 
-
 # ─────────────────────────────────────────────
-# 📋 نمایش لیست تسک‌ها به کاربر
+# 📋 نمایش لیست تسک‌ها
 # ─────────────────────────────────────────────
-@router.message(F.text == "📋 لیست وظایف")
+@router.message(F.text.in_(_LIST_TRIGGERS))
 async def handle_list_tasks(message: Message) -> None:
     user_info = message.from_user
     logger.info("📋 LIST TASKS REQUESTED user_id=%s", user_info.id)
@@ -143,23 +148,24 @@ async def handle_list_tasks(message: Message) -> None:
 
     try:
         async with get_session() as session:
-            tasks = await get_tasks_by_user_id(
+            # با امضای جدید: is_done → False/True
+            open_tasks = await get_tasks_by_user_id(
                 session,
                 user_id=user_id,
-                # می‌توانید با only_pending=True لیستِ در انتظار را نشان دهید
-                only_pending=False,
+                is_done=False,
                 limit=MAX_TASKS_PER_LIST,
-                offset=0,
+            )
+            done_tasks = await get_tasks_by_user_id(
+                session,
+                user_id=user_id,
+                is_done=True,
+                limit=MAX_TASKS_PER_LIST,
             )
 
-        if not tasks:
+        ordered: list[Task] = list(open_tasks) + list(done_tasks)
+        if not ordered:
             await message.answer("📭 هنوز هیچ تسکی ثبت نکردی.", reply_markup=main_menu_keyboard())
             return
-
-        # ابتدا pendingها، سپس doneها (برای UX بهتر)
-        pending = [t for t in tasks if not t.is_done]
-        done = [t for t in tasks if t.is_done]
-        ordered = pending + done
 
         # ارسال با فاصلهٔ کوتاه برای جلوگیری از Flood
         for idx, task in enumerate(ordered, start=1):
@@ -172,10 +178,10 @@ async def handle_list_tasks(message: Message) -> None:
                 logger.warning("⚠️ FAILED TO SEND TASK task_id=%s -> %s", getattr(task, "id", "?"), e)
             await asyncio.sleep(BATCH_SLEEP_SECONDS)
 
-        if len(tasks) >= MAX_TASKS_PER_LIST:
-            await message.answer(
-                f"ℹ️ فقط {MAX_TASKS_PER_LIST} تسک اخیر نمایش داده شد.",
-            )
+        # اگر مجموع از سقف بیشتر باشد، پیام راهنما
+        total_shown = len(ordered)
+        if total_shown >= MAX_TASKS_PER_LIST:
+            await message.answer(f"ℹ️ فقط {MAX_TASKS_PER_LIST} آیتم اخیر نمایش داده شد.")
 
         await message.answer("🔙 برگشت به منوی اصلی:", reply_markup=main_menu_keyboard())
 

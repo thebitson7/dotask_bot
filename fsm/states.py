@@ -1,4 +1,5 @@
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.state import StatesGroup, State
 
 class AddTask(StatesGroup):
     """
@@ -24,3 +25,8 @@ class AddTask(StatesGroup):
     # آماده برای توسعه بعدی:
     # waiting_for_reminder = State()     # 🔔 فعال‌سازی یادآوری زمان‌دار
     # waiting_for_attachment = State()   # 📎 بارگذاری فایل یا عکس به همراه تسک
+# fsm/states.py  (افزودن کنار AddTask)
+
+
+class EditTask(StatesGroup):
+    waiting_for_new_content = State()
