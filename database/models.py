@@ -10,9 +10,8 @@ if sys.version_info >= (3, 11):
     from enum import StrEnum
 else:
     from enum import Enum
-
     class StrEnum(str, Enum):  # type: ignore[no-redef]
-        def __str__(self) -> str:  # nicer repr/str
+        def __str__(self) -> str:
             return self.value
 
 from sqlalchemy import (
@@ -25,6 +24,7 @@ from sqlalchemy import (
     MetaData,
     String,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -42,7 +42,6 @@ _naming = MetaData(
         "pk": "pk_%(table_name)s",
     }
 )
-
 
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy ORM models."""
@@ -79,6 +78,7 @@ class User(Base):
     full_name: Mapped[Optional[str]] = mapped_column(String(100), comment="Display/full name")
     username: Mapped[Optional[str]] = mapped_column(String(50), comment="Telegram @username")
     language: Mapped[str] = mapped_column(String(10), default="fa", nullable=False, comment="Preferred language")
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -88,7 +88,7 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        onupdate=func.now(),
+        onupdate=func.now(),  # client-side onupdate (ORM) – برای اکثر درایورها کافی است
         nullable=False,
         comment="Last update timestamp (UTC)",
     )
@@ -126,26 +126,28 @@ class Task(Base):
     """Represents a task created by a user."""
     __tablename__ = "tasks"
     __table_args__ = (
-        # پرکاربرد: فیلتر بر اساس کاربر و وضعیت
+        # شاخص‌های پرکاربرد برای کوئری‌های لیست
         Index("idx_tasks_user_status", "user_id", "is_done"),
-        # مرتب‌سازی لیست‌ها به صورت جدیدترین اول
         Index("idx_tasks_user_created", "user_id", "created_at"),
-        # فیلترها:
-        Index("idx_tasks_due_date", "due_date"),
+        Index("idx_tasks_user_due", "user_id", "due_date"),
         Index("idx_tasks_priority", "priority"),
         # قیود کیفیت داده:
-        CheckConstraint(func.length("content") >= 3, name="tasks_content_minlen"),
+        # نکته: از متن SQL خالص استفاده می‌کنیم تا در همه‌ی درایورها درست کار کند.
+        CheckConstraint("length(content) >= 3", name="tasks_content_minlen"),
         CheckConstraint("(done_at IS NULL) OR (is_done = 1)", name="tasks_done_at_consistency"),
         {"comment": "Tasks created by users"},
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+
+    # ⚠️ مهم: این مقدار «ID داخلی users» است، نه telegram_id
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
-        comment="Owner user id",
+        comment="Owner user id (internal users.id)",
     )
+
     content: Mapped[str] = mapped_column(String(255), nullable=False, comment="Task content (<=255 chars)")
     due_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), comment="Optional due date (UTC)")
 
@@ -158,6 +160,7 @@ class Task(Base):
     )
 
     is_done: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, comment="Completion flag")
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -185,13 +188,12 @@ class Task(Base):
     def overdue(self) -> bool:
         """
         True if task has a due_date in the past and is not done.
-        (مقدار دقیق DB-side را می‌توان با expression هم تعریف کرد، اینجا client-side کافی است)
         """
         if self.is_done or self.due_date is None:
             return False
-        # اینجا فقط مقایسه‌ی naive/aware را به عهده‌ی DB گذاشتیم؛
-        # پیشنهاد: همه تاریخ‌ها UTC-aware باشند (هستند).
-        return self.due_date < datetime.utcnow().astimezone(self.due_date.tzinfo)
+        # اطمینان از مقایسه‌ی aware-to-aware
+        now_aware = datetime.utcnow().astimezone(self.due_date.tzinfo)
+        return self.due_date < now_aware
 
     @property
     def status(self) -> str:

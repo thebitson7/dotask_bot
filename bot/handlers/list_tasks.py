@@ -1,11 +1,11 @@
 # bot/handlers/list_tasks.py
 from __future__ import annotations
 
+import contextlib
 import logging
 from datetime import datetime, timezone
 from math import ceil
 from typing import Dict, List, Tuple, Optional
-import contextlib
 
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from core.config import get_settings
 from database.session import transactional_session
 from database.crud import (
+    create_or_update_user,   # ⬅️ برای نگاشت TG→DB
     get_tasks_paginated,
     set_task_done,
     delete_task_by_id,
@@ -25,17 +26,10 @@ from database.crud import (
 from database.models import Task, TaskPriority
 from bot.keyboards.listing import build_listing_keyboard
 from fsm.states import EditTask
-from database.crud import (
-    get_tasks_paginated,
-    set_task_done,
-    delete_task_by_id,
-    update_task_content,
-    snooze_task_by_id,
-)
-
 
 router = Router()
 logger = logging.getLogger("bot.handlers.list_tasks")
+
 settings = get_settings()
 LOCAL_TZ = ZoneInfo(settings.TZ)
 
@@ -53,8 +47,8 @@ _LIST_TRIGGERS = {
     "📋 نمایش تسک‌ها",
     "📋 تسک‌ها",
     "🗂 لیست کارها",
+    "📋 لیست وظایف",  # برای سازگاری با منو/متون دیگر
 }
-
 
 # ─────────────────────────────────────────
 # 🧩 ابزارهای کمکی
@@ -80,7 +74,7 @@ def _parse_kv(s: str) -> Tuple[str, Dict[str, str]]:
     return head, kv
 
 
-def _safe_int(v: str, default: int = 1) -> int:
+def _safe_int(v: str | int, default: int = 1) -> int:
     try:
         x = int(v)
         return x if x > 0 else default
@@ -88,61 +82,77 @@ def _safe_int(v: str, default: int = 1) -> int:
         return default
 
 
-def _fmt_due_local(due_utc: Optional[datetime]) -> str:
+def _fmt_due_local(due_utc: Optional[datetime | str]) -> str:
     if not due_utc:
         return "بدون تاریخ"
 
-    # پذیرش انواع ورودی: datetime یا str
-    dt = due_utc
-    if isinstance(dt, str):
-        # مثال: '2025-08-29 17:30:00.000000'
+    dt: datetime
+    if isinstance(due_utc, str):
         try:
-            dt = datetime.fromisoformat(dt)
+            dt = datetime.fromisoformat(due_utc)
         except Exception:
             return "بدون تاریخ"
+    else:
+        dt = due_utc
 
-    # اگر نايف است، آن را UTC فرض کن (ما به UTC ذخیره می‌کنیم)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
 
-    try:
+    with contextlib.suppress(Exception):
         local = dt.astimezone(LOCAL_TZ)
-    except Exception:
-        # خیلی بعید؛ در صورت هر خطا، با احترام fallback
-        return "بدون تاریخ"
+        now = datetime.now(LOCAL_TZ)
 
-    now = datetime.now(LOCAL_TZ)
+        if local.date() == now.date():
+            return f"امروز {local.strftime('%H:%M')}"
 
-    if local.date() == now.date():
-        return f"امروز {local.strftime('%H:%M')}"
+        delta = local - now
+        secs = int(delta.total_seconds())
+        if secs < 0:
+            hours = abs(secs) // 3600
+            if hours >= 24:
+                days = hours // 24
+                return f"گذشته ({days} روز)"
+            return f"گذشته ({hours} ساعت)"
+        else:
+            hours = secs // 3600
+            if hours >= 24:
+                days = hours // 24
+                return f"تا {days} روز"
+            return f"تا {hours} ساعت"
 
-    delta = local - now
-    secs = int(delta.total_seconds())
-
-    if secs < 0:
-        # گذشته
-        hours = abs(secs) // 3600
-        if hours >= 24:
-            days = hours // 24
-            return f"گذشته ({days} روز)"
-        return f"گذشته ({hours} ساعت)"
-
-    # آینده
-    hours = secs // 3600
-    if hours >= 24:
-        days = hours // 24
-        return f"تا {days} روز"
-    return f"تا {hours} ساعت"
+    return "بدون تاریخ"
 
 
 def _prio_icon(prio: TaskPriority) -> str:
-    return {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(prio.name, "⚪️")
+    name = prio.name if isinstance(prio, TaskPriority) else str(prio)
+    return {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(name, "⚪️")
 
 
 def _page_counter(page: int, per_page: int, total: int) -> Tuple[int, int, str]:
     total_pages = max(1, ceil(max(0, total) / max(1, per_page)))
     page = max(1, min(page, total_pages))
     return page, total_pages, f"صفحه {page}/{total_pages}"
+
+
+async def _db_user_id_from_tg(user) -> Optional[int]:
+    """
+    Telegram user → DB user.id
+    - اگر کاربر نبود، می‌سازیم/به‌روزرسانی می‌کنیم (idempotent)
+    """
+    try:
+        async with transactional_session() as session:
+            u = await create_or_update_user(
+                session=session,
+                telegram_id=user.id,
+                full_name=user.full_name,
+                username=user.username,
+                language=(user.language_code or settings.DEFAULT_LANG),
+                commit=False,
+            )
+            return u.id if u else None
+    except Exception as e:
+        logger.exception("💥 USER MAP FAILED tg=%s -> %s", getattr(user, "id", "?"), e)
+        return None
 
 
 def _render_list_text(
@@ -157,7 +167,6 @@ def _render_list_text(
 ) -> str:
     page, total_pages, page_label = _page_counter(page, per_page, total)
     title = "📋 تسک‌های باز" if status == "o" else "✅ تسک‌های انجام‌شده"
-    # نمایش فیلترها به‌صورت کوتاه ولی قابل فهم
     prio_map = {"A": "همه", "H": "بالا", "M": "متوسط", "L": "پایین"}
     date_map = {"A": "همه", "T": "امروز", "W": "این هفته", "O": "گذشته", "N": "بدون تاریخ"}
     meta = f"🔎 فیلترها → اولویت: {prio_map.get(prio_filter,'همه')} | تاریخ: {date_map.get(date_filter,'همه')}"
@@ -178,6 +187,59 @@ def _render_list_text(
     return "\n".join(lines)
 
 
+async def _fetch_page(
+    *,
+    db_user_id: int,
+    status: str,
+    page: int,
+    prio_filter: str,
+    date_filter: str,
+    now_utc: datetime,
+) -> Tuple[List[Task], int, int]:
+    """
+    داده‌های صفحه خواسته‌شده را می‌گیرد؛ اگر page خارج از بازه بود، آن را به آخرین صفحه اصلاح می‌کند و دوباره می‌گیرد.
+    خروجی: (tasks, total, final_page)
+    """
+    is_done: Optional[bool]
+    if status == "o":
+        is_done = False
+    elif status == "d":
+        is_done = True
+    else:
+        is_done = None
+
+    async with transactional_session() as session:
+        tasks, total = await get_tasks_paginated(
+            session,
+            user_id=db_user_id,            # ⬅️ DB user.id (نه Telegram ID)
+            is_done=is_done,
+            prio_filter=prio_filter,
+            date_filter=date_filter,
+            page=page,
+            per_page=PER_PAGE,
+            now_utc=now_utc,
+        )
+
+        # اگر صفحه خالی و page > 1 بود، به آخرین صفحه برویم
+        if not tasks and page > 1:
+            _, total_pages, _ = _page_counter(page, PER_PAGE, total)
+            fixed_page = max(1, total_pages)
+            if fixed_page != page:
+                tasks, total = await get_tasks_paginated(
+                    session,
+                    user_id=db_user_id,
+                    is_done=is_done,
+                    prio_filter=prio_filter,
+                    date_filter=date_filter,
+                    page=fixed_page,
+                    per_page=PER_PAGE,
+                    now_utc=now_utc,
+                )
+                return tasks, total, fixed_page
+
+    return tasks, total, page
+
+
 async def _show_list(
     *,
     source: Message | CallbackQuery,
@@ -186,27 +248,33 @@ async def _show_list(
     prio_filter: str = DEFAULT_PRIO,
     date_filter: str = DEFAULT_DATE,
     edit: bool = False,
+    db_user_id: Optional[int] = None,   # ⬅️ برای پاس‌دادن مستقیم (اگر قبلاً گرفتیم)
 ) -> None:
-    uid = source.from_user.id
+    # نگاشت TG→DB (اگر پاس نشده بود)
+    if db_user_id is None:
+        db_user_id = await _db_user_id_from_tg(source.from_user)
+    if not db_user_id:
+        # اگر کاربر در DB ثبت نشد، پیام راهنما بده
+        txt = "❗ حساب شما شناسایی نشد. لطفاً /start را بزنید."
+        if isinstance(source, Message):
+            await source.answer(txt)
+        else:
+            with contextlib.suppress(Exception):
+                await source.message.answer(txt)
+                await source.answer()
+        return
+
     now_utc = datetime.now(timezone.utc)
 
-    async with transactional_session() as session:
-        is_done = None
-        if status == "o":
-            is_done = False
-        elif status == "d":
-            is_done = True
-
-        tasks, total = await get_tasks_paginated(
-            session,
-            user_id=uid,
-            is_done=is_done,
-            prio_filter=prio_filter,
-            date_filter=date_filter,
-            page=page,
-            per_page=PER_PAGE,
-            now_utc=now_utc,
-        )
+    # دریافت داده‌ها با اصلاح احتمالی صفحه
+    tasks, total, page = await _fetch_page(
+        db_user_id=db_user_id,
+        status=status,
+        page=page,
+        prio_filter=prio_filter,
+        date_filter=date_filter,
+        now_utc=now_utc,
+    )
 
     # متن و کیبورد
     text = _render_list_text(
@@ -232,10 +300,15 @@ async def _show_list(
     if isinstance(source, Message):
         await source.answer(text, reply_markup=kb)
     else:
-        if edit:
-            await source.message.edit_text(text, reply_markup=kb)
-        else:
-            await source.message.answer(text, reply_markup=kb)
+        try:
+            if edit:
+                await source.message.edit_text(text, reply_markup=kb)
+            else:
+                await source.message.answer(text, reply_markup=kb)
+        except Exception as e:
+            logger.debug("edit_text failed -> %s ; falling back to answer()", e)
+            with contextlib.suppress(Exception):
+                await source.message.answer(text, reply_markup=kb)
         with contextlib.suppress(Exception):
             await source.answer()  # بستن لودینگ
 
@@ -245,7 +318,15 @@ async def _show_list(
 # ─────────────────────────────────────────
 @router.message(F.text.in_(_LIST_TRIGGERS))
 async def entry_list(message: Message) -> None:
-    await _show_list(source=message, status=DEFAULT_STATUS, page=1, prio_filter=DEFAULT_PRIO, date_filter=DEFAULT_DATE)
+    db_uid = await _db_user_id_from_tg(message.from_user)
+    await _show_list(
+        source=message,
+        status=DEFAULT_STATUS,
+        page=1,
+        prio_filter=DEFAULT_PRIO,
+        date_filter=DEFAULT_DATE,
+        db_user_id=db_uid,  # ⬅️ پاس می‌دهیم تا دوباره resolve نشود
+    )
 
 
 # ─────────────────────────────────────────
@@ -253,19 +334,20 @@ async def entry_list(message: Message) -> None:
 # ─────────────────────────────────────────
 @router.callback_query(F.data.startswith("tlist"))
 async def on_list_nav(cb: CallbackQuery) -> None:
-    head, kv = _parse_kv(cb.data)
+    _, kv = _parse_kv(cb.data)
     s = kv.get("s", DEFAULT_STATUS)
     p = _safe_int(kv.get("p", "1"), 1)
     f = kv.get("f", DEFAULT_PRIO)
     d = kv.get("d", DEFAULT_DATE)
-    await _show_list(source=cb, status=s, page=p, prio_filter=f, date_filter=d, edit=True)
+    db_uid = await _db_user_id_from_tg(cb.from_user)
+    await _show_list(source=cb, status=s, page=p, prio_filter=f, date_filter=d, edit=True, db_user_id=db_uid)
 
 
-# دکمهٔ وسط صفحه که «noop» است (برای جلوگیری از خطا)
-@router.callback_query(F.data == "noop:listing")
+# دکمهٔ وسط صفحه «noop» — هم نسخه‌ی قدیمی هم جدید
+@router.callback_query(F.data.in_({"noop", "noop:listing"}))
 async def noop_listing(cb: CallbackQuery) -> None:
-    # فقط بسته‌شدن لودینگ؛ پیام جدیدی لازم نیست
-    await cb.answer(" ")
+    with contextlib.suppress(Exception):
+        await cb.answer(" ")
 
 
 # ─────────────────────────────────────────
@@ -290,10 +372,15 @@ async def act_done(cb: CallbackQuery) -> None:
         return
     s, p, f, d = _ctx_from_kv(kv)
 
+    db_uid = await _db_user_id_from_tg(cb.from_user)
+    if not db_uid:
+        await cb.answer("❗ حساب شما شناسایی نشد.", show_alert=True)
+        return
+
     async with transactional_session() as session:
-        ok = await set_task_done(session, user_id=cb.from_user.id, task_id=tid, done=True, commit=False)
+        ok = await set_task_done(session, user_id=db_uid, task_id=tid, done=True, commit=False)
     await cb.answer("✅ انجام شد" if ok else "❗ خطا")
-    await _show_list(source=cb, status=s, page=p, prio_filter=f, date_filter=d, edit=True)
+    await _show_list(source=cb, status=s, page=p, prio_filter=f, date_filter=d, edit=True, db_user_id=db_uid)
 
 
 @router.callback_query(F.data.startswith("tact:undo:"))
@@ -307,10 +394,15 @@ async def act_undo(cb: CallbackQuery) -> None:
         return
     s, p, f, d = _ctx_from_kv(kv)
 
+    db_uid = await _db_user_id_from_tg(cb.from_user)
+    if not db_uid:
+        await cb.answer("❗ حساب شما شناسایی نشد.", show_alert=True)
+        return
+
     async with transactional_session() as session:
-        ok = await set_task_done(session, user_id=cb.from_user.id, task_id=tid, done=False, commit=False)
+        ok = await set_task_done(session, user_id=db_uid, task_id=tid, done=False, commit=False)
     await cb.answer("↩️ به حالت باز برگشت" if ok else "❗ خطا")
-    await _show_list(source=cb, status=s, page=p, prio_filter=f, date_filter=d, edit=True)
+    await _show_list(source=cb, status=s, page=p, prio_filter=f, date_filter=d, edit=True, db_user_id=db_uid)
 
 
 @router.callback_query(F.data.startswith("tact:del:"))
@@ -324,13 +416,16 @@ async def act_delete(cb: CallbackQuery) -> None:
         return
     s, p, f, d = _ctx_from_kv(kv)
 
+    db_uid = await _db_user_id_from_tg(cb.from_user)
+    if not db_uid:
+        await cb.answer("❗ حساب شما شناسایی نشد.", show_alert=True)
+        return
+
     async with transactional_session() as session:
-        ok = await delete_task_by_id(session, user_id=cb.from_user.id, task_id=tid, commit=False)
+        ok = await delete_task_by_id(session, user_id=db_uid, task_id=tid, commit=False)
     await cb.answer("🗑 حذف شد" if ok else "❗ خطا")
 
-    # بعد از حذف، نمایش مجدد همان صفحه/فیلتر؛
-    # اگر صفحه خالی شود، داخل _render/_keyboard با کل مجموع به‌درستی هندل می‌شود.
-    await _show_list(source=cb, status=s, page=p, prio_filter=f, date_filter=d, edit=True)
+    await _show_list(source=cb, status=s, page=p, prio_filter=f, date_filter=d, edit=True, db_user_id=db_uid)
 
 
 # ✏️ ویرایش (نسخه‌ی ساده: فقط محتوا را با پیام بعدی می‌گیرد)
@@ -371,10 +466,16 @@ async def act_edit_save(message: Message, state: FSMContext) -> None:
         await message.answer("❗ متن کوتاه است. حداقل ۳ کاراکتر.")
         return
 
+    db_uid = await _db_user_id_from_tg(message.from_user)
+    if not db_uid:
+        await message.answer("❗ حساب شما شناسایی نشد. /start را بزنید.")
+        await state.clear()
+        return
+
     async with transactional_session() as session:
         ok = await update_task_content(
             session,
-            user_id=message.from_user.id,
+            user_id=db_uid,
             task_id=tid,
             new_content=new_text,
             commit=False,
@@ -382,7 +483,7 @@ async def act_edit_save(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     await message.answer("✅ ویرایش شد." if ok else "❗ خطا در ویرایش.")
-    await _show_list(source=message, status=s, page=p, prio_filter=f, date_filter=d)
+    await _show_list(source=message, status=s, page=p, prio_filter=f, date_filter=d, db_user_id=db_uid)
 
 
 # 🔁 اسنوز: مرحله ۱ → انتخاب مدت
@@ -429,9 +530,14 @@ async def act_snooze_apply(cb: CallbackQuery) -> None:
 
     s, p, f, d = _ctx_from_kv(kv)
 
+    db_uid = await _db_user_id_from_tg(cb.from_user)
+    if not db_uid:
+        await cb.answer("❗ حساب شما شناسایی نشد.", show_alert=True)
+        return
+
     async with transactional_session() as session:
         ok = await snooze_task_by_id(
-            session, user_id=cb.from_user.id, task_id=tid, delta_minutes=mins, commit=False
+            session, user_id=db_uid, task_id=tid, delta_minutes=mins, commit=False
         )
     await cb.answer("🔁 اسنوز شد" if ok else "❗ خطا")
-    await _show_list(source=cb, status=s, page=p, prio_filter=f, date_filter=d, edit=True)
+    await _show_list(source=cb, status=s, page=p, prio_filter=f, date_filter=d, edit=True, db_user_id=db_uid)

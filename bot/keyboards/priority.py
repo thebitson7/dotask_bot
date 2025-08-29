@@ -7,10 +7,14 @@ from typing import Iterable, Optional, Sequence, Tuple
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from core.config import get_settings
 from database.models import TaskPriority
 
-settings = get_settings()
+# ─────────────────────────────────────────────
+# ⚙️ تنظیمات (lazy import برای جلوگیری از مسائل import order)
+# ─────────────────────────────────────────────
+def _settings():
+    from core.config import get_settings  # lazy
+    return get_settings()
 
 # ─────────────────────────────────────────────
 # 🌍 ترجمه‌ها (fa/en) + اموجی
@@ -32,10 +36,12 @@ _I18N: dict[str, dict[str, str]] = {
 # ترتیب پیش‌فرض (High → Low)
 _DEFAULT_ORDER: Tuple[str, ...] = ("HIGH", "MEDIUM", "LOW")
 
-# حداکثر طول مجاز برای callback_data در تلگرام
+# محدودیت تلگرام برای callback_data
 _CALLBACK_MAX = 64
 
-
+# ─────────────────────────────────────────────
+# 🔧 Utilities
+# ─────────────────────────────────────────────
 def _norm_lang(code: Optional[str]) -> Optional[str]:
     return (code or "").strip().lower() or None
 
@@ -44,6 +50,7 @@ def _fallback_chain(preferred: Optional[str]) -> list[str]:
     """
     چینِ fallback: [lang, DEFAULT_LANG, LOCALE_FALLBACKS..., 'fa', 'en'] (بدون تکرار)
     """
+    s = _settings()
     chain: list[str] = []
     seen: set[str] = set()
 
@@ -54,8 +61,8 @@ def _fallback_chain(preferred: Optional[str]) -> list[str]:
             chain.append(c)
 
     add(preferred)
-    add(settings.DEFAULT_LANG)
-    for fb in settings.LOCALE_FALLBACKS:
+    add(getattr(s, "DEFAULT_LANG", None))
+    for fb in getattr(s, "LOCALE_FALLBACKS", ()):
         add(fb)
     # fallback سخت
     add("fa")
@@ -71,14 +78,31 @@ def _labels_for(lang: Optional[str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for code in _fallback_chain(lang):
         out.update(_I18N.get(code, {}))
-    # اطمینان از وجود همه‌ی کلیدها
-    for key in _DEFAULT_ORDER:
+    for key in _DEFAULT_ORDER:  # اطمینان از وجود همه‌ی کلیدها
         out.setdefault(key, _I18N["en"][key])
     return out
 
 
 def _to_name(val: TaskPriority | str) -> str:
     return val.name if isinstance(val, TaskPriority) else str(val).upper()
+
+
+def _validate_prefix(prefix: str) -> str:
+    prefix = prefix or "priority:"
+    if ":" not in prefix:
+        # برای سازگاری بهتر در parsing
+        prefix = prefix + ":"
+    if len(prefix) >= _CALLBACK_MAX:
+        raise ValueError(f"prefix too long ({len(prefix)} >= {_CALLBACK_MAX})")
+    return prefix
+
+
+def _clamp_columns(columns: int) -> int:
+    try:
+        c = int(columns)
+    except Exception:
+        c = 3
+    return max(1, min(c, 5))  # عملی: 1..5 ستون
 
 
 def priority_label(priority: TaskPriority | str, *, lang: Optional[str] = None) -> str:
@@ -93,9 +117,9 @@ def priority_callback_data(priority: TaskPriority | str, prefix: str = "priority
     """
     ساخت callback_data استاندارد برای یک اولویت. (مثل: 'priority:HIGH')
     """
+    prefix = _validate_prefix(prefix)
     name = _to_name(priority)
     data = f"{prefix}{name}"
-    # تضمین طول مجاز
     if len(data) > _CALLBACK_MAX:
         raise ValueError(f"callback_data too long ({len(data)}>{_CALLBACK_MAX}): {data!r}")
     return data
@@ -105,7 +129,8 @@ def parse_priority_from_callback(data: str, prefix: str = "priority:") -> Option
     """
     پارس کردن callback_data و برگرداندن TaskPriority یا None.
     """
-    if not data.startswith(prefix):
+    prefix = _validate_prefix(prefix)
+    if not data or not data.startswith(prefix):
         return None
     name = data[len(prefix):].strip().upper()
     try:
@@ -127,7 +152,7 @@ def _cached_priority_keyboard(
 ) -> InlineKeyboardMarkup:
     labels = _labels_for(lang)
 
-    # ترتیب: ابتدا طبق order، سپس بقیه‌ی allowed که در order نیامده‌اند
+    # ترتیب: ابتدا طبق order، سپس بقیه‌ی allowed که در order نیستند
     ordered: list[str] = [n for n in order_names if n in allowed_names]
     for n in allowed_names:
         if n not in ordered:
@@ -138,11 +163,10 @@ def _cached_priority_keyboard(
         text = labels.get(name, name.title())
         callback = f"{prefix}{name}"
         if len(callback) > _CALLBACK_MAX:
-            # در عمل این اتفاق نمی‌افتد، ولی برای کمال‌گرایی
             raise ValueError(f"callback_data too long ({len(callback)}>{_CALLBACK_MAX}): {callback!r}")
         builder.button(text=text, callback_data=callback)
 
-    builder.adjust(max(1, int(columns) if columns and columns > 0 else 1))
+    builder.adjust(columns)
     return builder.as_markup()
 
 
@@ -163,8 +187,8 @@ def priority_keyboard(
     پارامترها:
       - lang: زبان متن دکمه‌ها (None → از settings و fallback استفاده می‌شود)
       - allowed: مجموعهٔ اولویت‌های مجاز (پیش‌فرض: همهٔ enumها)
-      - order: ترتیب دلخواه نمایش (بقیهٔ allowed ها انتهای لیست می‌آیند)
-      - columns: تعداد ستون‌ها (پیش‌فرض 3)
+      - order: ترتیب دلخواه نمایش (بقیهٔ allowed در انتها)
+      - columns: تعداد ستون‌ها (۱..۵)
       - prefix: پیش‌وند callback_data (پیش‌فرض "priority:")
 
     مثال‌ها:
@@ -172,16 +196,25 @@ def priority_keyboard(
       priority_keyboard(lang="en", columns=2)
       priority_keyboard(allowed=[TaskPriority.HIGH, TaskPriority.LOW], order=[TaskPriority.LOW, TaskPriority.HIGH])
     """
+    prefix = _validate_prefix(prefix)
+    columns = _clamp_columns(columns)
+
     # آماده‌سازی نام‌ها برای کش (hashable)
+    all_names = tuple(p.name for p in TaskPriority)  # HIGH, MEDIUM, LOW
+
     if allowed is None:
-        allowed_names = tuple(p.name for p in TaskPriority)  # HIGH, MEDIUM, LOW
+        allowed_names = all_names
     else:
-        allowed_names = tuple(_to_name(p) for p in allowed)
+        allowed_names = tuple(_to_name(p) for p in allowed if _to_name(p) in all_names)
+        if not allowed_names:
+            allowed_names = all_names  # fallback: خالی نماند
 
     if order is None:
         order_names = _DEFAULT_ORDER
     else:
-        order_names = tuple(_to_name(p) for p in order)
+        order_names = tuple(_to_name(p) for p in order if _to_name(p) in all_names)
+        if not order_names:
+            order_names = _DEFAULT_ORDER
 
     return _cached_priority_keyboard(
         _norm_lang(lang),
@@ -192,9 +225,20 @@ def priority_keyboard(
     )
 
 
+# ─────────────────────────────────────────────
+# 🧩 کمکی‌های عمومی
+# ─────────────────────────────────────────────
+def all_priority_labels(lang: Optional[str] = None) -> dict[str, str]:
+    """
+    یک دیکشنری از name→label (برای مصرف در رندرهای دیگر UI).
+    """
+    return _labels_for(lang).copy()
+
+
 __all__ = [
     "priority_keyboard",
     "priority_label",
     "priority_callback_data",
     "parse_priority_from_callback",
+    "all_priority_labels",
 ]

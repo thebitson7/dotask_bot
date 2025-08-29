@@ -28,12 +28,23 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # ───────────────────────────────
-# 🔧 Helpers
+# ⚙️ Config
 # ───────────────────────────────
 CONTENT_MAX_LEN = 255
 LOCAL_TZ = ZoneInfo(settings.TZ)
 
+__all__ = [
+    "start_add_task",
+    "receive_content",
+    "handle_due_selection",
+    "receive_custom_date",
+    "handle_priority_selection",
+]
 
+
+# ───────────────────────────────
+# 🔧 Helpers
+# ───────────────────────────────
 def _normalize_content(text: str) -> str:
     """Trim/condense whitespace and enforce DB max length."""
     text = (text or "").strip()
@@ -113,8 +124,16 @@ async def _safe_answer(source: Message | CallbackQuery, text: str, **kwargs) -> 
 
 def _lang_of(user) -> str:
     """Detect user language or fallback to default."""
-    # aiogram User.language_code e.g. 'fa', 'en'
     return (getattr(user, "language_code", None) or settings.DEFAULT_LANG or "fa").lower()
+
+
+# ───────────────────────────────
+# 🛑 خروج از فرایند (اختیاری اما مفید)
+# ───────────────────────────────
+@router.message(F.text.in_({"/cancel", "لغو"}))
+async def cancel_add_task(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("⛔️ فرایند ساخت تسک لغو شد.", reply_markup=main_menu_keyboard())
 
 
 # ───────────────────────────────
@@ -160,6 +179,12 @@ async def receive_content(message: Message, state: FSMContext) -> None:
     await message.answer("⏰ زمان انجام تسک را انتخاب کنید:", reply_markup=_due_keyboard())
 
 
+# جلوگیری از ورودی‌های غیرمتنی در این مرحله
+@router.message(AddTask.waiting_for_content)
+async def receive_content_invalid(message: Message) -> None:
+    await message.answer("❗ لطفاً فقط متن ارسال کنید.")
+
+
 # ───────────────────────────────
 # ⏰ مرحله 3: انتخاب تاریخ از کیبورد
 # ───────────────────────────────
@@ -190,20 +215,25 @@ async def handle_due_selection(callback: CallbackQuery, state: FSMContext) -> No
                 "• 2025-09-15 14:30\n"
                 "• 15.09.2025\n"
                 "• 15.09.2025 14:30\n"
-                "• 2025/09/15"
+                "• 2025/09/15\n\n"
+                "برای لغو: /cancel"
             )
             await state.set_state(AddTask.waiting_for_custom_date)
             await callback.answer()
             return
         case _:
             logger.warning("⚠️ INVALID DATE choice=%r user=%s", choice, callback.from_user.id)
-            await callback.answer("❗ تاریخ نامعتبر است.")
+            await callback.answer("❗ تاریخ نامعتبر است.", show_alert=False)
             return
+
+    # جلوگیری از تاریخ گذشته (برای گزینه‌های today/urgent/week)
+    if due_local and due_local < now:
+        # حداقل به ۳۰ دقیقه بعد تنظیم می‌کنیم
+        due_local = now + timedelta(minutes=30)
 
     await state.update_data(due_date=_to_utc(due_local))
     await state.set_state(AddTask.waiting_for_priority)
 
-    # بستن UI لودینگ و حرکت به اولویت — کیبورد با زبان کاربر
     await callback.answer()
     await callback.message.answer(
         "📌 لطفاً اولویت تسک را انتخاب کنید:",
@@ -221,7 +251,7 @@ async def receive_custom_date(message: Message, state: FSMContext) -> None:
         await message.answer("❗ فرمت اشتباه است. مثال: 2025-09-15 یا 2025-09-15 14:30")
         return
 
-    # جلوگیری از تاریخ گذشته (صرفاً تاریخ/ساعت نسبت به الان محلی)
+    # جلوگیری از تاریخ گذشته (نسبت به الانِ محلی)
     if parsed < _now_local():
         await message.answer("⚠️ تاریخ/زمان گذشته است. لطفاً زمان آینده وارد کنید.")
         return
@@ -232,6 +262,12 @@ async def receive_custom_date(message: Message, state: FSMContext) -> None:
         "📌 حالا لطفاً اولویت تسک را انتخاب کنید:",
         reply_markup=priority_keyboard(lang=_lang_of(message.from_user)),
     )
+
+
+# جلوگیری از ورودی‌های غیرمتنی در مرحله تاریخ دستی
+@router.message(AddTask.waiting_for_custom_date)
+async def receive_custom_date_invalid(message: Message) -> None:
+    await message.answer("❗ لطفاً تاریخ را به‌صورت متن وارد کنید.")
 
 
 # ───────────────────────────────
@@ -298,7 +334,7 @@ async def _save_task(source: Message | CallbackQuery, state: FSMContext) -> None
             content=content,
             due_date=due_date_utc,
             priority=priority,
-            commit=False,  # در transactional_session اتمیک کمیت می‌شود
+            commit=False,  # transactional_session اتمیک commit می‌کند
         )
 
         if task:

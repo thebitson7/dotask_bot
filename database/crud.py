@@ -10,17 +10,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import Task, TaskPriority, User
 
 __all__ = [
-    # Create/Update
+    # Users
     "create_or_update_user",
+    # Tasks create/read
     "create_task",
-    # Listing + filters
     "get_tasks_paginated",
     "get_tasks_by_user_id",
     "count_tasks_by_status",
     # Mutations
     "set_task_done",
-    "mark_task_as_done",      # alias legacy
-    "unmark_task_as_done",    # alias legacy
+    "mark_task_as_done",      # legacy alias
+    "unmark_task_as_done",    # legacy alias
     "delete_task_by_id",
     "update_task_content",
     "snooze_task_by_id",
@@ -29,14 +29,31 @@ __all__ = [
 # ─────────────────────────────────────────────────────────────
 # 🕒 Utilities
 # ─────────────────────────────────────────────────────────────
+
 def _utcnow() -> datetime:
-    """Current UTC time (aware)."""
+    """Current UTC (aware)."""
     return datetime.now(timezone.utc)
+
+
+def _coerce_positive_int(val: int | str | None, default: int, minimum: int = 1) -> int:
+    """به مقدار صحیح مثبت تبدیل می‌کند (برای page/limit/offset)."""
+    try:
+        x = int(val) if val is not None else default
+    except Exception:
+        return default
+    return max(minimum, x)
+
+
+def _priority_from_code(code: str) -> Optional[TaskPriority]:
+    """Map 'H'/'M'/'L' -> TaskPriority; otherwise None."""
+    mapping = {"H": TaskPriority.HIGH, "M": TaskPriority.MEDIUM, "L": TaskPriority.LOW}
+    return mapping.get(code)
 
 
 # ─────────────────────────────────────────────────────────────
 # 👤 کاربر: ساخت/به‌روزرسانی
 # ─────────────────────────────────────────────────────────────
+
 async def create_or_update_user(
     session: AsyncSession,
     *,
@@ -64,9 +81,11 @@ async def create_or_update_user(
             updated_at=now,
         )
         session.add(user)
-        await session.flush()  # برای گرفتن id
+        # برای دریافت id
+        await session.flush()
     else:
         changed = False
+        # فقط اگر مقدار جدید متفاوت است
         if user.full_name != full_name:
             user.full_name = (full_name or "")[:100] if full_name else None
             changed = True
@@ -88,6 +107,7 @@ async def create_or_update_user(
 # ─────────────────────────────────────────────────────────────
 # ➕ تسک: ساخت
 # ─────────────────────────────────────────────────────────────
+
 async def create_task(
     session: AsyncSession,
     *,
@@ -103,7 +123,7 @@ async def create_task(
     now = _utcnow()
     task = Task(
         user_id=user_id,
-        content=content[:255],
+        content=(content or "")[:255],
         due_date=due_date,
         priority=priority,
         is_done=False,
@@ -112,7 +132,7 @@ async def create_task(
         done_at=None,
     )
     session.add(task)
-    await session.flush()
+    await session.flush()  # id
 
     if commit:
         await session.commit()
@@ -122,9 +142,11 @@ async def create_task(
 # ─────────────────────────────────────────────────────────────
 # 🔎 فهرست تسک‌ها با فیلتر و صفحه‌بندی
 # ─────────────────────────────────────────────────────────────
-# date_filter: 'A' = همه، 'T' = امروز (UTC)، 'W' = این هفته (UTC, Monday-based)
+# date_filter: 'A' = همه، 'T' = امروز (UTC، 00:00..24:00)،
+#              'W' = این هفته (UTC، شروع دوشنبه)،
 #              'O' = گذشته (overdue)، 'N' = بدون تاریخ
 # prio_filter: 'A' = همه، یا 'H'/'M'/'L'
+
 async def get_tasks_paginated(
     session: AsyncSession,
     *,
@@ -143,18 +165,21 @@ async def get_tasks_paginated(
     if now_utc is None:
         now_utc = _utcnow()
 
-    page = max(1, int(page or 1))
-    per_page = max(1, int(per_page or 5))
+    page = _coerce_positive_int(page, 1)
+    per_page = _coerce_positive_int(per_page, 5)
 
     conds = [Task.user_id == user_id]
 
+    # وضعیت
     if is_done is not None:
         conds.append(Task.is_done.is_(True if is_done else False))
 
-    if prio_filter in ("H", "M", "L"):
-        mapping = {"H": TaskPriority.HIGH, "M": TaskPriority.MEDIUM, "L": TaskPriority.LOW}
-        conds.append(Task.priority == mapping[prio_filter])
+    # اولویت
+    prio = _priority_from_code(prio_filter)
+    if prio is not None:
+        conds.append(Task.priority == prio)
 
+    # تاریخ
     if date_filter == "T":  # امروز (UTC)
         start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
@@ -170,17 +195,20 @@ async def get_tasks_paginated(
         conds.append(Task.due_date.is_(None))
     # 'A' → بدون محدودیت تاریخ
 
+    # شمارش کل
     stmt_count = select(func.count()).select_from(Task).where(and_(*conds))
     total: int = int((await session.execute(stmt_count)).scalar_one())
 
+    # صفحه‌بندی
     offset = (page - 1) * per_page
 
+    # ترتیب
     stmt = (
         select(Task)
         .where(and_(*conds))
         .order_by(
             Task.is_done.asc(),               # بازها جلوتر
-            Task.due_date.is_(None).asc(),    # آیتم‌های دارای due جلوتر
+            Task.due_date.is_(None).asc(),    # dueدارها جلوتر
             Task.due_date.asc().nulls_last(), # نزدیک‌ترها جلوتر؛ Null آخر
             Task.created_at.desc(),
         )
@@ -194,7 +222,7 @@ async def get_tasks_paginated(
 # ─────────────────────────────────────────────────────────────
 # 🧾 گرفتن چند تسک اخیر کاربر (برای منو/نمایش سریع)
 # ─────────────────────────────────────────────────────────────
-# ⬇️ جایگزینِ کاملِ تابع get_tasks_by_user_id در database/crud.py
+# سازگار با نسخه‌های قدیمی: only_pending و … نادیده‌گیری امن پارامترهای اضافی
 
 async def get_tasks_by_user_id(
     session: AsyncSession,
@@ -204,20 +232,24 @@ async def get_tasks_by_user_id(
     limit: int = 5,
     offset: int = 0,
     only_pending: Optional[bool] = None,
-    **_ignored,  # برای سازگاری با امضاهای قدیمی (پارامترهای اضافی را نادیده می‌گیریم)
+    **_ignored,  # پارامترهای غیرمنتظره از هندلرهای قدیمی
 ) -> List[Task]:
     """
     چند تسک اخیر کاربر را برمی‌گرداند.
+    - is_done=None  → همه
+    - is_done=False → فقط بازها
+    - is_done=True  → فقط انجام‌شده‌ها
 
     Backward-compatible:
-      - only_pending=True  -> فقط تسک‌های باز (is_done=False)
-      - only_pending=False -> فقط تسک‌های انجام‌شده (is_done=True)
-      - اگر is_done مشخص شده باشد، همان ملاک است و only_pending نادیده گرفته می‌شود.
-      - offset/limit پشتیبانی می‌شوند.
+      - اگر is_done مشخص نیست و only_pending داده شده:
+          only_pending=True  -> is_done=False
+          only_pending=False -> is_done=True
     """
-    # نگاشت سازگاری
     if is_done is None and only_pending is not None:
         is_done = False if only_pending else True
+
+    limit = _coerce_positive_int(limit, 5)
+    offset = max(0, int(offset or 0))
 
     conds = [Task.user_id == user_id]
     if is_done is not None:
@@ -227,13 +259,13 @@ async def get_tasks_by_user_id(
         select(Task)
         .where(and_(*conds))
         .order_by(
-            Task.is_done.asc(),               # بازها جلوتر
-            Task.due_date.is_(None).asc(),    # dueدارها جلوتر
-            Task.due_date.asc().nulls_last(), # نزدیک‌ترها جلوتر
+            Task.is_done.asc(),
+            Task.due_date.is_(None).asc(),
+            Task.due_date.asc().nulls_last(),
             Task.created_at.desc(),
         )
-        .offset(max(0, int(offset or 0)))
-        .limit(max(1, int(limit or 5)))
+        .offset(offset)
+        .limit(limit)
     )
     return (await session.execute(stmt)).scalars().all()
 
@@ -241,14 +273,13 @@ async def get_tasks_by_user_id(
 # ─────────────────────────────────────────────────────────────
 # 🔢 شمارش سریع تسک‌ها برای منو
 # ─────────────────────────────────────────────────────────────
+
 async def count_tasks_by_status(
     session: AsyncSession,
     *,
     user_id: int,
 ) -> Tuple[int, int]:
-    """
-    (open_count, done_count) را برمی‌گرداند.
-    """
+    """(open_count, done_count)"""
     total_open = (
         await session.execute(
             select(func.count()).select_from(Task).where(Task.user_id == user_id, Task.is_done.is_(False))
@@ -267,6 +298,7 @@ async def count_tasks_by_status(
 # ─────────────────────────────────────────────────────────────
 # ✅ انجام/برگرداندن انجام‌نشده
 # ─────────────────────────────────────────────────────────────
+
 async def set_task_done(
     session: AsyncSession,
     *,
@@ -291,9 +323,7 @@ async def set_task_done(
     return (result.rowcount or 0) > 0
 
 
-# ─────────────────────────────────────────────────────────────
-# Aliases برای سازگاری با کد قدیمی
-# ─────────────────────────────────────────────────────────────
+# Aliases (سازگاری با کد قدیمی)
 async def mark_task_as_done(
     session: AsyncSession,
     *,
@@ -319,8 +349,9 @@ async def unmark_task_as_done(
 
 
 # ─────────────────────────────────────────────────────────────
-# 🗑 حذف تسک
+# 🗑 حذف
 # ─────────────────────────────────────────────────────────────
+
 async def delete_task_by_id(
     session: AsyncSession,
     *,
@@ -336,8 +367,9 @@ async def delete_task_by_id(
 
 
 # ─────────────────────────────────────────────────────────────
-# ✏️ ویرایش محتوای تسک
+# ✏️ ویرایش محتوا
 # ─────────────────────────────────────────────────────────────
+
 async def update_task_content(
     session: AsyncSession,
     *,
@@ -350,7 +382,7 @@ async def update_task_content(
     stmt = (
         update(Task)
         .where(Task.id == task_id, Task.user_id == user_id)
-        .values(content=new_content[:255], updated_at=now)
+        .values(content=(new_content or "")[:255], updated_at=now)
     )
     result = await session.execute(stmt)
     if commit:
@@ -359,8 +391,9 @@ async def update_task_content(
 
 
 # ─────────────────────────────────────────────────────────────
-# 🔁 اسنوز/تعویق تسک
+# 🔁 اسنوز/تعویق
 # ─────────────────────────────────────────────────────────────
+
 async def snooze_task_by_id(
     session: AsyncSession,
     *,
@@ -379,7 +412,12 @@ async def snooze_task_by_id(
         return False
 
     base = task.due_date or now
-    new_due = base + timedelta(minutes=max(1, int(delta_minutes or 0)))
+    try:
+        minutes = _coerce_positive_int(delta_minutes, 15)
+    except Exception:
+        minutes = 15
+
+    new_due = base + timedelta(minutes=minutes)
     stmt = (
         update(Task)
         .where(Task.id == task_id, Task.user_id == user_id)
