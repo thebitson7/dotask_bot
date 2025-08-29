@@ -21,7 +21,9 @@ from zoneinfo import ZoneInfo
 _VALID_DB_SCHEMES = (
     "sqlite+aiosqlite",
     "postgresql+asyncpg",
+    "postgresql+psycopg",      # psycopg3 (async)
     "mysql+aiomysql",
+    "mssql+aioodbc",
     "mssql+pytds",
     "oracle+oracledb",
 )
@@ -44,8 +46,7 @@ def _csv(var: Optional[str]) -> list[str]:
 class Settings(BaseSettings):
     """
     🔧 Global Configuration
-    - مقادیر از `.env` و متغیرهای محیطی خوانده می‌شوند.
-    - تمام فیلدها تایپ‌شده و اعتبارسنجی می‌شوند.
+    Values load from environment (.env + OS env).
     """
 
     # ───────────── Telegram ─────────────
@@ -63,11 +64,13 @@ class Settings(BaseSettings):
     # ───────────── Database ─────────────
     DB_URL: str = Field(
         default="sqlite+aiosqlite:///db.sqlite3",
-        description="SQLAlchemy async URL. e.g. sqlite+aiosqlite:///db.sqlite3 or postgresql+asyncpg://user:pass@host:5432/db",
+        description="SQLAlchemy async URL, e.g. sqlite+aiosqlite:///db.sqlite3 or postgresql+asyncpg://user:pass@host:5432/db",
     )
     DB_ECHO: bool = False
     DB_POOL_SIZE: int = Field(default=10, ge=1)
     DB_POOL_TIMEOUT: int = Field(default=30, ge=1)  # seconds
+    DB_POOL_RECYCLE: int = Field(default=1800, ge=0, description="Seconds to recycle pooled connections")
+    DB_MAX_OVERFLOW: int = Field(default=10, ge=0)
 
     # ───────────── Cache / Queue (اختیاری) ─────────────
     REDIS_URL: Optional[str] = Field(default=None, description="redis://localhost:6379/0")
@@ -159,6 +162,25 @@ class Settings(BaseSettings):
             return [str(x).strip() for x in v if str(x).strip()]
         return _csv(v)
 
+    @field_validator("WEBHOOK_DOMAIN")
+    @classmethod
+    def _v_webhook_domain(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return None
+        dom = v.strip()
+        # نباید scheme داشته باشد؛ فقط دامنه/دامنه:پورت
+        if dom.startswith("http://") or dom.startswith("https://"):
+            raise ValueError("WEBHOOK_DOMAIN must be domain only (e.g. 'example.com'), not a full URL.")
+        # حذف اسلش انتهایی
+        return dom.rstrip("/")
+
+    @field_validator("WEBHOOK_PATH", mode="before")
+    @classmethod
+    def _v_webhook_path(cls, v: str) -> str:
+        # به صورت canonical: با یک / شروع شود، اسلش‌های اضافی حذف
+        p = "/" + str(v or "").strip().lstrip("/")
+        return p
+
     def model_post_init(self, __context: ValidationInfo) -> None:
         if self.DEBUG is None:
             object.__setattr__(self, "DEBUG", self.ENV != "production")
@@ -166,6 +188,9 @@ class Settings(BaseSettings):
             object.__setattr__(self, "LOG_LEVEL", "DEBUG" if self.DEBUG else "INFO")
         if self.WEBHOOK_MODE and not self.WEBHOOK_DOMAIN:
             raise ValueError("WEBHOOK_MODE=True requires WEBHOOK_DOMAIN to be set (public domain).")
+        # اطمینان: DEFAULT_LANG جزو SUPPORTED_LOCALES باشد
+        if self.DEFAULT_LANG not in self.SUPPORTED_LOCALES:
+            self.SUPPORTED_LOCALES.append(self.DEFAULT_LANG)
 
     # ───────────── Computed fields / helpers ─────────────
     @computed_field  # type: ignore[misc]
@@ -195,6 +220,12 @@ class Settings(BaseSettings):
 
     @computed_field  # type: ignore[misc]
     @property
+    def TZINFO(self) -> ZoneInfo:
+        # مصرف این در کد: settings.TZINFO
+        return ZoneInfo(self.TZ)
+
+    @computed_field  # type: ignore[misc]
+    @property
     def effective_log_level(self) -> str:
         return self.LOG_LEVEL or ("DEBUG" if self.DEBUG else "INFO")
 
@@ -205,11 +236,17 @@ class Settings(BaseSettings):
 
     @computed_field  # type: ignore[misc]
     @property
+    def redis_enabled(self) -> bool:
+        return bool(self.REDIS_URL and self.REDIS_URL.strip())
+
+    @computed_field  # type: ignore[misc]
+    @property
     def webhook_url(self) -> Optional[str]:
         if not self.WEBHOOK_MODE or not self.WEBHOOK_DOMAIN:
             return None
-        domain = self.WEBHOOK_DOMAIN.strip().rstrip("/")
-        path = "/" + self.WEBHOOK_PATH.strip().lstrip("/")
+        # WEBHOOK_DOMAIN قبلاً بدون scheme ذخیره شده
+        domain = self.WEBHOOK_DOMAIN
+        path = self.WEBHOOK_PATH  # canonical از validator
         return f"{self.WEBHOOK_SCHEME}://{domain}{path}"
 
     def as_safe_dict(self) -> dict:

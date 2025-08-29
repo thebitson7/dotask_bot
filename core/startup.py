@@ -6,13 +6,15 @@ import inspect
 import logging
 import signal
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.strategy import FSMStrategy
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.base import BaseStorage
+
 
 # Redis (اختیاری)
 try:
@@ -23,9 +25,9 @@ except Exception:  # pragma: no cover
     RedisStorage = None  # type: ignore
 
 from core.config import get_settings
-from database.session import init_db
+from database.session import init_db, shutdown_db
 
-# Routers
+# روترها
 logger = logging.getLogger("DoTaskStartup")
 try:
     from bot.handlers import add_task, delete_task, mark_done, menu, list_tasks
@@ -34,7 +36,7 @@ except Exception as e:
     logger.exception("❌ Router import failed: %s", e)
     raise
 
-# Webhook server (aiohttp) - فقط وقتی WEBHOOK_MODE=True
+# Webhook server (aiohttp) - وقتی WEBHOOK_MODE=True
 try:
     from aiohttp import web
     from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -43,34 +45,77 @@ except Exception:  # pragma: no cover
 
 settings = get_settings()
 
+# ─────────────────────────────────────────────────────────
+# 🧩 Sentry (اختیاری)
+# ─────────────────────────────────────────────────────────
+def _maybe_setup_sentry() -> None:
+    if not settings.SENTRY_DSN:
+        return
+    import importlib
+    try:
+        sentry_sdk = importlib.import_module("sentry_sdk")
+    except ModuleNotFoundError:
+        logger.warning("⚠️ sentry-sdk not installed. Unset SENTRY_DSN or `pip install sentry-sdk`.")
+        return
 
-async def _resolve_storage() -> Any:
+    integrations = []
+    # Logging integration (اختیاری)
+    try:
+        LoggingIntegration = importlib.import_module(
+            "sentry_sdk.integrations.logging"
+        ).LoggingIntegration
+        integrations.append(LoggingIntegration(level=logging.INFO, event_level=logging.ERROR))
+    except Exception:
+        pass
+
+    # aiohttp integration (اختیاری)
+    try:
+        AioHttpIntegration = importlib.import_module(
+            "sentry_sdk.integrations.aiohttp"
+        ).AioHttpIntegration
+        integrations.append(AioHttpIntegration())
+    except Exception:
+        pass
+
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        integrations=integrations,
+        traces_sample_rate=0.0,
+        profiles_sample_rate=0.0,
+        environment=settings.ENV,
+    )
+    logger.info("🪪 Sentry initialized (%s)", ", ".join(type(i).__name__ for i in integrations) or "no-integrations")
+
+
+# ─────────────────────────────────────────────────────────
+# 💾 Storage: Redis یا Memory
+# ─────────────────────────────────────────────────────────
+async def _resolve_storage() -> Tuple[BaseStorage, Optional[Any]]:
     """
-    انتخاب بهترین ذخیره‌ساز FSM:
-    - RedisStorage اگر REDIS_URL تنظیم شده و وابستگی‌ها موجود باشند.
-    - در غیر اینصورت MemoryStorage.
+    RedisStorage اگر REDIS_URL و وابستگی‌ها OK باشند، وگرنه MemoryStorage.
+    خروجی: (storage, redis_client_or_none)
     """
-    if settings.REDIS_URL and aioredis and RedisStorage:
+    if settings.redis_enabled and aioredis and RedisStorage:
         try:
             redis = aioredis.from_url(settings.REDIS_URL, decode_responses=False)
             with suppress(Exception):
                 await redis.ping()
             logger.info("🔌 Using Redis storage for FSM")
-            return RedisStorage(
-                redis=redis,
-                key_builder=DefaultKeyBuilder(with_bot_id=True),
-            )
+            storage = RedisStorage(redis=redis, key_builder=DefaultKeyBuilder(with_bot_id=True))
+            return storage, redis
         except Exception as e:
             logger.warning("⚠️ Redis unavailable (%s). Falling back to MemoryStorage.", e)
 
     logger.info("💾 Using in-memory FSM storage")
-    return MemoryStorage()
+    return MemoryStorage(), None
 
 
+# ─────────────────────────────────────────────────────────
+# 🧭 ثبت روترها
+# ─────────────────────────────────────────────────────────
 def _include_routers(dp: Dispatcher) -> None:
     """
-    ثبت همه‌ی روترها در یک نقطه.
-    ترتیب مهم است: /start قبل از بقیه.
+    ترتیب مهم: /start قبل از بقیه.
     """
     dp.include_routers(
         start_handler.router,
@@ -83,9 +128,12 @@ def _include_routers(dp: Dispatcher) -> None:
     logger.debug("🧭 Routers registered: start, add_task, mark_done, delete_task, list_tasks, menu")
 
 
+# ─────────────────────────────────────────────────────────
+# 🧾 Bot commands (اختیاری)
+# ─────────────────────────────────────────────────────────
 async def _maybe_setup_bot_commands(bot: Bot) -> None:
     """
-    اگر bot/commands.py فانکشن setup داشته باشد، دستورات بات را ثبت می‌کند.
+    اگر bot/commands.py فانکشنی مانند setup|setup_bot_commands|register داشت، دستورات را ثبت می‌کند.
     """
     with suppress(Exception):
         import importlib
@@ -102,24 +150,21 @@ async def _maybe_setup_bot_commands(bot: Bot) -> None:
                 return
 
 
-async def _startup_common() -> Tuple[Bot, Dispatcher]:
-    """
-    کارهای مشترک استارتاپ:
-    - init DB
-    - ساخت Bot و Dispatcher
-    - اعتبارسنجی توکن با get_me (لاگ واضح)
-    - ثبت روترها
-    - ثبت دستورات بات (اختیاری)
-    """
-    logger.info("📦 Initializing database...")
+# ─────────────────────────────────────────────────────────
+# 🚀 مرحله مشترک استارت
+# ─────────────────────────────────────────────────────────
+async def _startup_common() -> Tuple[Bot, Dispatcher, Optional[Any]]:
+    logger.info("📦 Initializing database…")
     await init_db()
+
+    _maybe_setup_sentry()
 
     bot = Bot(
         token=settings.BOT_TOKEN.get_secret_value(),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    # اعتبارسنجی توکن/اتصال همین ابتدا تا اگر ایرادی هست زود بترکد
+    # صحت‌سنجی توکن/اتصال
     try:
         me = await bot.get_me()
         logger.info("🤖 Bot authorized: @%s (id=%s)", me.username, me.id)
@@ -129,7 +174,7 @@ async def _startup_common() -> Tuple[Bot, Dispatcher]:
             await bot.session.close()
         raise
 
-    storage = await _resolve_storage()
+    storage, redis_client = await _resolve_storage()
     dp = Dispatcher(
         storage=storage,
         fsm_strategy=FSMStrategy.CHAT,
@@ -138,20 +183,19 @@ async def _startup_common() -> Tuple[Bot, Dispatcher]:
     _include_routers(dp)
     await _maybe_setup_bot_commands(bot)
 
-    return bot, dp
+    return bot, dp, redis_client
 
 
+# ─────────────────────────────────────────────────────────
+# 🔁 Polling
+# ─────────────────────────────────────────────────────────
 async def _run_polling(bot: Bot, dp: Dispatcher) -> None:
-    """
-    شروع Long Polling با تنظیمات امن.
-    """
     logger.info("🔁 Starting in Long Polling mode…")
 
-    # اطمینان از اینکه وبهوک قبلی حذف شده و آپدیت‌های قدیمی نمی‌آیند
+    # حذف وبهوک قبلی و Drop آپدیت‌های معلق
     with suppress(Exception):
         await bot.delete_webhook(drop_pending_updates=True)
 
-    # اگر Aiogram توانست تشخیص دهد، همان؛ وگرنه صریح تعیین می‌کنیم
     try:
         allowed_updates = dp.resolve_used_update_types()
         if not allowed_updates:
@@ -167,19 +211,23 @@ async def _run_polling(bot: Bot, dp: Dispatcher) -> None:
     )
 
 
+# ─────────────────────────────────────────────────────────
+# 🌐 Webhook (AIOHTTP)
+# ─────────────────────────────────────────────────────────
 async def _run_webhook(bot: Bot, dp: Dispatcher) -> None:
-    """
-    راه‌اندازی وبهوک با aiohttp (مخصوص Production).
-    """
     if web is None:
         raise RuntimeError("aiohttp is not available. Install it or disable WEBHOOK_MODE.")
-
     if not settings.webhook_url:
         raise ValueError("WEBHOOK_MODE=True but webhook_url is not configured properly.")
 
     logger.info("🌐 Starting in Webhook mode at %s", settings.webhook_url)
 
     app = web.Application()
+
+    # مسیر سلامت ساده
+    async def health(_req):
+        return web.json_response({"ok": True})
+    app.router.add_get("/healthz", health)
 
     # ثبت هندلر وبهوک Aiogram
     webhook_handler = SimpleRequestHandler(
@@ -214,12 +262,11 @@ async def _run_webhook(bot: Bot, dp: Dispatcher) -> None:
             await runner.cleanup()
 
 
+# ─────────────────────────────────────────────────────────
+# 🧬 چرخهٔ عمر (سیگنال‌ها، cleanup)
+# ─────────────────────────────────────────────────────────
 @asynccontextmanager
-async def _lifespan(bot: Bot, dp: Dispatcher):
-    """
-    مدیریت شات‌داون تمیز (SIGINT/SIGTERM).
-    روی ویندوز ممکن است سیگنال‌ها محدود باشند، suppress شده‌اند.
-    """
+async def _lifespan(bot: Bot, dp: Dispatcher, redis_client: Optional[Any]):
     loop = asyncio.get_running_loop()
 
     def _stop_signal(signame: str):
@@ -232,22 +279,30 @@ async def _lifespan(bot: Bot, dp: Dispatcher):
     try:
         yield
     finally:
-        logger.info("🔻 Closing bot & storage…")
+        logger.info("🔻 Closing bot, storage and DB…")
         with suppress(Exception):
             await dp.storage.close()
+        if redis_client is not None:
+            with suppress(Exception):
+                await redis_client.close()
         with suppress(Exception):
             await bot.session.close()
+        with suppress(Exception):
+            await shutdown_db()
 
 
+# ─────────────────────────────────────────────────────────
+# 🏁 Entry point
+# ─────────────────────────────────────────────────────────
 async def start_bot() -> None:
     """
     ورودی اصلی اپ. بات را در حالت Polling یا Webhook بالا می‌آورد.
     """
-    bot, dp = await _startup_common()
+    bot, dp, redis_client = await _startup_common()
     logger.info("✅ Bot is ready to receive updates.")
 
     async with AsyncExitStack() as stack:
-        await stack.enter_async_context(_lifespan(bot, dp))
+        await stack.enter_async_context(_lifespan(bot, dp, redis_client))
 
         try:
             if settings.WEBHOOK_MODE:
