@@ -8,7 +8,7 @@ from aiogram import Router, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from database.crud import create_or_update_user, delete_task_by_id
+from database import crud  # ماژول رو میاریم، نه نمادها
 from database.session import transactional_session
 
 router = Router()
@@ -113,7 +113,7 @@ async def handle_confirm_delete(cb: CallbackQuery) -> None:
     try:
         async with transactional_session() as session:
             # اطمینان از وجود/به‌روزرسانی کاربر
-            user = await create_or_update_user(
+            user = await crud.create_or_update_user(
                 session=session,
                 telegram_id=cb.from_user.id,
                 full_name=cb.from_user.full_name,
@@ -126,7 +126,7 @@ async def handle_confirm_delete(cb: CallbackQuery) -> None:
                 await _safe_cb_answer(cb, "❗ حساب کاربری پیدا نشد. لطفاً /start را بزنید.", show_alert=True)
                 return
 
-            deleted = await delete_task_by_id(
+            deleted = await crud.delete_task_by_id(
                 session=session,
                 user_id=user.id,
                 task_id=task_id,

@@ -6,6 +6,7 @@ from html import escape
 from typing import Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import contextlib
 
 from aiogram import Router, F
 from aiogram.exceptions import TelegramBadRequest
@@ -15,7 +16,7 @@ from sqlalchemy import select
 
 from core.config import get_settings
 from database.session import transactional_session
-from database.crud import create_or_update_user, set_task_done
+from database import crud
 from database.models import Task
 
 router = Router()
@@ -23,12 +24,14 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 LOCAL_TZ = ZoneInfo(settings.TZ)
 
+__all__ = ["router"]
+
 # ─────────────────────────────────────────────
 # 🔧 Helpers
 # ─────────────────────────────────────────────
 def _extract_task_id(cb_data: str, prefix: str = "done:") -> Optional[int]:
     """
-    انتظار داریم فرمت کال‌بک به صورت 'done:<task_id>' باشد.
+    فرمت انتظار: 'done:<task_id>'
     """
     if not cb_data or not cb_data.startswith(prefix):
         return None
@@ -39,17 +42,14 @@ def _extract_task_id(cb_data: str, prefix: str = "done:") -> Optional[int]:
 
 
 async def _safe_cb_answer(cb: CallbackQuery, text: str = "", **kwargs) -> None:
-    try:
+    with contextlib.suppress(Exception):
         await cb.answer(text, **kwargs)
-    except Exception as e:  # pragma: no cover
-        logger.debug("Callback answer failed: %s", e)
 
 
 def _to_local(dt: Optional[datetime]) -> Optional[datetime]:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        # اگر به هر دلیل naive بود، محلی فرض کن
         return dt.replace(tzinfo=LOCAL_TZ)
     return dt.astimezone(LOCAL_TZ)
 
@@ -83,8 +83,8 @@ async def handle_mark_task_done(callback: CallbackQuery) -> None:
 
     try:
         async with transactional_session() as session:
-            # اطمینان از وجود/به‌روزرسانی کاربر
-            db_user = await create_or_update_user(
+            # اطمینان از وجود/به‌روزرسانی کاربر (id داخلی users)
+            db_user = await crud.create_or_update_user(
                 session=session,
                 telegram_id=user.id,
                 full_name=user.full_name,
@@ -97,39 +97,50 @@ async def handle_mark_task_done(callback: CallbackQuery) -> None:
                 await _safe_cb_answer(callback, "❗ حساب کاربری پیدا نشد. لطفاً /start را بزن.", show_alert=True)
                 return
 
-            # علامت‌گذاری به حالت انجام‌شده
-            ok = await set_task_done(
+            # به حالت انجام‌شده علامت بزن
+            ok = await crud.set_task_done(
                 session=session,
-                user_id=db_user.id,
+                user_id=db_user.id,   # دقت: id داخلی جدول users
                 task_id=task_id,
                 done=True,
-                commit=False,  # transactional_session خودش commit می‌کند
+                commit=False,         # transactional_session خودکار commit می‌کند
             )
             if not ok:
                 logger.info("ℹ️ TASK NOT FOUND OR NO ACCESS user=%s task=%s", user.id, task_id)
                 await _safe_cb_answer(callback, "❌ تسک پیدا نشد یا قبلاً حذف شده.", show_alert=True)
                 return
 
-            # پس از به‌روزرسانی، تسک را برای رندر دوباره بخوان
+            # بعد از آپدیت، رکورد را برای رندر بخوان
             row = await session.execute(
                 select(Task).where(Task.id == task_id, Task.user_id == db_user.id)
             )
             task: Optional[Task] = row.scalars().first()
 
+        # فیدبک فوری
         await _safe_cb_answer(callback, "✅ وضعیت تسک: انجام‌شده.")
 
-        # اگر پیام اصلی هنوز وجود دارد، آن را با نسخهٔ انجام‌شده ویرایش کن
-        if task:
-            try:
-                await callback.message.edit_text(
-                    _render_done_message(task.content, task.due_date, task.done_at)
-                )
-            except TelegramBadRequest as e:
-                # اگر تغییری نکرده یا پیام قابل ویرایش نیست، لاگ کم‌نویز
-                if "message is not modified" not in str(e).lower():
-                    logger.debug("Edit failed: %s", e)
-            except Exception as e:
-                logger.debug("Message edit unexpected error: %s", e)
+        # اگر پیام اصلی در دسترس است، متن و/یا کیبورد را آپدیت کن
+        if callback.message:
+            if task:
+                # تلاش برای ادیت متن با قالب «انجام‌شده»
+                try:
+                    await callback.message.edit_text(
+                        _render_done_message(task.content, task.due_date, task.done_at)
+                    )
+                except TelegramBadRequest as e:
+                    # اگر متن تغییری نکرد یا قابل ادیت نیست، لاگ سبک و فقط کیبورد را بردار
+                    if "message is not modified" not in str(e).lower():
+                        logger.debug("Edit text failed: %s", e)
+                    with contextlib.suppress(Exception):
+                        await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception as e:
+                    logger.debug("Message edit unexpected error: %s", e)
+                    with contextlib.suppress(Exception):
+                        await callback.message.edit_reply_markup(reply_markup=None)
+            else:
+                # اگر تسک برنگشت (نادر)، حداقل کیبورد را پاک کن
+                with contextlib.suppress(Exception):
+                    await callback.message.edit_reply_markup(reply_markup=None)
 
     except Exception as e:
         logger.exception("💥 ERROR @handle_mark_task_done user=%s task=%s -> %s", user.id, task_id, e)

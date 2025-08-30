@@ -15,7 +15,6 @@ from aiogram.fsm.strategy import FSMStrategy
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.base import BaseStorage
 
-
 # Redis (اختیاری)
 try:
     import redis.asyncio as aioredis  # type: ignore
@@ -27,8 +26,9 @@ except Exception:  # pragma: no cover
 from core.config import get_settings
 from database.session import init_db, shutdown_db
 
-# روترها
 logger = logging.getLogger("DoTaskStartup")
+
+# روترها (اول /start)
 try:
     from bot.handlers import add_task, delete_task, mark_done, menu, list_tasks
     from bot.handlers import start as start_handler
@@ -84,7 +84,8 @@ def _maybe_setup_sentry() -> None:
         profiles_sample_rate=0.0,
         environment=settings.ENV,
     )
-    logger.info("🪪 Sentry initialized (%s)", ", ".join(type(i).__name__ for i in integrations) or "no-integrations")
+    names = ", ".join(type(i).__name__ for i in integrations) or "no-integrations"
+    logger.info("🪪 Sentry initialized (%s)", names)
 
 
 # ─────────────────────────────────────────────────────────
@@ -95,7 +96,7 @@ async def _resolve_storage() -> Tuple[BaseStorage, Optional[Any]]:
     RedisStorage اگر REDIS_URL و وابستگی‌ها OK باشند، وگرنه MemoryStorage.
     خروجی: (storage, redis_client_or_none)
     """
-    if settings.redis_enabled and aioredis and RedisStorage:
+    if settings.REDIS_URL and aioredis and RedisStorage:
         try:
             redis = aioredis.from_url(settings.REDIS_URL, decode_responses=False)
             with suppress(Exception):
@@ -114,15 +115,12 @@ async def _resolve_storage() -> Tuple[BaseStorage, Optional[Any]]:
 # 🧭 ثبت روترها
 # ─────────────────────────────────────────────────────────
 def _include_routers(dp: Dispatcher) -> None:
-    """
-    ترتیب مهم: /start قبل از بقیه.
-    """
     dp.include_routers(
-        start_handler.router,
+        start_handler.router,   # همیشه اول
         add_task.router,
         mark_done.router,
         delete_task.router,
-        list_tasks.router,  # نمایش/فیلتر/صفحه‌بندی تسک‌ها
+        list_tasks.router,
         menu.router,
     )
     logger.debug("🧭 Routers registered: start, add_task, mark_done, delete_task, list_tasks, menu")
@@ -137,7 +135,6 @@ async def _maybe_setup_bot_commands(bot: Bot) -> None:
     """
     with suppress(Exception):
         import importlib
-
         mod = importlib.import_module("bot.commands")
         for name in ("setup", "setup_bot_commands", "register", "set_bot_commands"):
             fn = getattr(mod, name, None)
@@ -175,10 +172,7 @@ async def _startup_common() -> Tuple[Bot, Dispatcher, Optional[Any]]:
         raise
 
     storage, redis_client = await _resolve_storage()
-    dp = Dispatcher(
-        storage=storage,
-        fsm_strategy=FSMStrategy.CHAT,
-    )
+    dp = Dispatcher(storage=storage, fsm_strategy=FSMStrategy.CHAT)
 
     _include_routers(dp)
     await _maybe_setup_bot_commands(bot)
@@ -205,10 +199,7 @@ async def _run_polling(bot: Bot, dp: Dispatcher) -> None:
 
     logger.debug("Allowed updates: %s", allowed_updates)
 
-    await dp.start_polling(
-        bot,
-        allowed_updates=allowed_updates,
-    )
+    await dp.start_polling(bot, allowed_updates=allowed_updates)
 
 
 # ─────────────────────────────────────────────────────────

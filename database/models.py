@@ -24,7 +24,7 @@ from sqlalchemy import (
     MetaData,
     String,
     func,
-    text,
+    and_,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -81,14 +81,14 @@ class User(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=func.now(),
+        server_default=func.now(),         # UTC در سمت DB
         nullable=False,
         comment="Creation timestamp (UTC)",
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        onupdate=func.now(),  # client-side onupdate (ORM) – برای اکثر درایورها کافی است
+        onupdate=func.now(),               # به‌روزرسانی در ORM-side (cross-DB قابل اعتماد)
         nullable=False,
         comment="Last update timestamp (UTC)",
     )
@@ -101,11 +101,10 @@ class User(Base):
         passive_deletes=True,
     )
 
+    __mapper_args__ = {"eager_defaults": True}  # created_at/updated_at بعد از INSERT بدون refresh در دسترس‌اند
+
     def __repr__(self) -> str:
-        return (
-            f"<User id={self.id} tg={self.telegram_id} "
-            f"username={self.username!r} name={self.full_name!r}>"
-        )
+        return f"<User id={self.id} tg={self.telegram_id} username={self.username!r} name={self.full_name!r}>"
 
     def to_dict(self) -> dict:
         return {
@@ -131,8 +130,7 @@ class Task(Base):
         Index("idx_tasks_user_created", "user_id", "created_at"),
         Index("idx_tasks_user_due", "user_id", "due_date"),
         Index("idx_tasks_priority", "priority"),
-        # قیود کیفیت داده:
-        # نکته: از متن SQL خالص استفاده می‌کنیم تا در همه‌ی درایورها درست کار کند.
+        # قیود کیفیت داده (cross-DB):
         CheckConstraint("length(content) >= 3", name="tasks_content_minlen"),
         CheckConstraint("(done_at IS NULL) OR (is_done = 1)", name="tasks_done_at_consistency"),
         {"comment": "Tasks created by users"},
@@ -140,7 +138,7 @@ class Task(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
 
-    # ⚠️ مهم: این مقدار «ID داخلی users» است، نه telegram_id
+    # ⚠️ این «id داخلی users» است، نه telegram_id
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
@@ -151,7 +149,7 @@ class Task(Base):
     content: Mapped[str] = mapped_column(String(255), nullable=False, comment="Task content (<=255 chars)")
     due_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), comment="Optional due date (UTC)")
 
-    # 🎯 Priority Enum (native Postgres enum; strings elsewhere)
+    # 🎯 Priority Enum (native PG enum؛ در بقیه DBها string-based)
     priority: Mapped[TaskPriority] = mapped_column(
         SqlEnum(TaskPriority, name="task_priority_enum", validate_strings=True),
         default=TaskPriority.default,
@@ -183,7 +181,9 @@ class Task(Base):
         passive_deletes=True,
     )
 
-    # ── Hybrid helpers ───────────────────
+    __mapper_args__ = {"eager_defaults": True}
+
+    # ── Hybrid: Python-side + SQL expression (برای فیلتر DB-side) ─────────────
     @hybrid_property
     def overdue(self) -> bool:
         """
@@ -191,9 +191,12 @@ class Task(Base):
         """
         if self.is_done or self.due_date is None:
             return False
-        # اطمینان از مقایسه‌ی aware-to-aware
         now_aware = datetime.utcnow().astimezone(self.due_date.tzinfo)
         return self.due_date < now_aware
+
+    @overdue.expression  # به DB می‌گوید چطور فیلتر کند؛ func.now() cross-DB
+    def overdue(cls):
+        return and_(cls.is_done.is_(False), cls.due_date.is_not(None), cls.due_date < func.now())
 
     @property
     def status(self) -> str:
