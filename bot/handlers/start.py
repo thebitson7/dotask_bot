@@ -1,74 +1,152 @@
 # bot/handlers/start.py
+from __future__ import annotations
+
+import logging
+from html import escape
+from typing import Optional
+
 from aiogram import Router
-from aiogram.types import Message
 from aiogram.filters import CommandStart
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import Message
 
-from bot.keyboards.main_menu import main_menu_keyboard
-from database.session import get_session
-from database.crud import create_or_update_user
 from core.config import get_settings
-import logging
+from bot.keyboards.main_menu import main_menu_keyboard
+from database.session import transactional_session, get_session
+from database import crud
 
 router = Router()
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-@router.message(CommandStart())
-async def handle_start(message: Message):
-    user = message.from_user
-    logger.info(f"[👋 /start] {user.full_name} ({user.id})")
 
-    # 1) ایجاد/به‌روزرسانی کاربر با لاگ شفاف
+def _lang(user) -> str:
+    """fa/en با fallback به تنظیمات."""
+    return (getattr(user, "language_code", None) or settings.DEFAULT_LANG or "fa").lower()
+
+
+def _mk_welcome_fa(first_name: Optional[str], open_count: int, done_count: int, payload: Optional[str]) -> str:
+    name = escape(first_name or "")
+    intro = f"<b>🎉 خوش اومدی{name and f'، {name}' or ''}!</b>\nمن اینجام که کمکت کنم تسک‌هات رو سریع و خوشگل مدیریت کنی. 🧠"
+    stats = f"\n\n📊 وضعیت فعلی تو:\n• باز: <b>{open_count}</b>\n• انجام‌شده: <b>{done_count}</b>"
+    hint_payload = ""
+    if payload:
+        hint_payload = (
+            "\n\n🧲 لینک ورودی تشخیص داده شد — اگر می‌خوای همون متنو به‌عنوان تسک ذخیره کنی، "
+            "روی «➕ افزودن تسک» بزن و همونو بفرست."
+        )
+    actions = (
+        "\n\n⬇️ از اینجا شروع کن:\n"
+        "• «➕ افزودن تسک» برای ساخت سریع\n"
+        "• «📋 لیست تسک‌ها» برای مرور و مدیریت\n"
+        "• «🔎 جستجو» برای پیدا کردن فوری\n"
+        "• «⚙️ تنظیمات» برای شخصی‌سازی"
+    )
+    cta = "\n\n👇 یکی از گزینه‌ها رو انتخاب کن:"
+    return f"{intro}{stats}{hint_payload}{actions}{cta}"
+
+
+def _mk_welcome_en(first_name: Optional[str], open_count: int, done_count: int, payload: Optional[str]) -> str:
+    name = escape(first_name or "")
+    intro = f"<b>🎉 Welcome{name and f', {name}' or ''}!</b>\nI’m here to help you manage tasks fast and beautifully. 🧠"
+    stats = f"\n\n📊 Your current status:\n• Open: <b>{open_count}</b>\n• Done: <b>{done_count}</b>"
+    hint_payload = ""
+    if payload:
+        hint_payload = (
+            "\n\n🧲 Deep-link detected — if you want to save that text as a task, "
+            "tap “➕ Add Task” and send it."
+        )
+    actions = (
+        "\n\n⬇️ Start here:\n"
+        "• “➕ Add Task” to create quickly\n"
+        "• “📋 Tasks” to browse & manage\n"
+        "• “🔎 Search” to find instantly\n"
+        "• “⚙️ Settings” to customize"
+    )
+    cta = "\n\n👇 Pick an option:"
+    return f"{intro}{stats}{hint_payload}{actions}{cta}"
+
+
+def _extract_start_payload(text: Optional[str]) -> Optional[str]:
+    """
+    /start payload را اگر وجود داشت برمی‌گرداند.
+    مثال‌ها:
+      /start
+      /start add
+      /start buy-milk
+    """
+    if not text:
+        return None
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) == 2 and parts[0].startswith("/start"):
+        return parts[1].strip() or None
+    return None
+
+
+@router.message(CommandStart())
+async def handle_start(message: Message) -> None:
+    user = message.from_user
+    lang = _lang(user)
+    payload = _extract_start_payload(message.text)
+
+    logger.info("[👋 /start] user=%s (%s) payload=%r", user.full_name, user.id, payload)
+
+    # 1) تضمین کاربر + گرفتن آمار
+    open_count = done_count = 0
     try:
-        logger.debug("[/start] ensure user in DB...")
-        async with get_session() as session:
-            _ = await create_or_update_user(
+        async with transactional_session() as session:
+            # ensure/create user
+            db_user = await crud.create_or_update_user(
                 session=session,
                 telegram_id=user.id,
                 full_name=user.full_name,
                 username=user.username,
-                language=(user.language_code or settings.DEFAULT_LANG),
+                language=lang,
+                commit=False,  # transactional_session کمیت می‌کند
             )
-        logger.debug("[/start] ensure user DONE.")
-    except Exception as e:
-        # اگر اینجا خطا خورد هم هنوز می‌خواهیم پیام خوش‌آمد بدهیم
-        logger.exception(f"[/start] ensure_user failed (tg={user.id}) -> {e}")
+        # count (خارج از تراکنش جدا، read-only)
+        async with get_session() as rsession:
+            open_count, done_count = await crud.count_tasks_by_status(rsession, user_id=db_user.id)  # type: ignore[attr-defined]
+    except Exception:
+        logger.exception("[/start] ensure/count failed; continue with defaults.")
 
-    # 2) ساخت کیبورد با محافظ
-    kb = None
+    # 2) ساخت کیبورد
     try:
-        logger.debug("[/start] build main menu keyboard...")
         kb = main_menu_keyboard()
-        logger.debug("[/start] keyboard OK.")
-    except Exception as e:
-        logger.exception(f"[/start] main_menu_keyboard() failed -> {e}")
-        kb = None  # بدون کیبورد ادامه بده
+    except Exception:
+        logger.exception("[/start] main_menu_keyboard failed; fallback to None.")
+        kb = None
 
-    # 3) ارسال پیام خوش‌آمد (HTML ساده، بدون وابستگی به parse_mode)
+    # 3) متن خوش‌آمد
     welcome = (
-        "<b>🎉 به DoTask خوش اومدی!</b>\n\n"
-        "من اینجام که کمکت کنم تسک‌هات رو مدیریت کنی. 🧠\n\n"
-        "➕ تسک اضافه کن\n"
-        "📋 لیست تسک‌هات رو ببین\n"
-        "👇 یکی از گزینه‌های زیر رو انتخاب کن:"
+        _mk_welcome_fa(user.first_name, open_count, done_count, payload)
+        if lang.startswith("fa")
+        else _mk_welcome_en(user.first_name, open_count, done_count, payload)
     )
 
+    # 4) ارسال پیام
     try:
         await message.answer(welcome, reply_markup=kb)
         logger.info("[/start] welcome message sent.")
     except TelegramBadRequest as e:
-        logger.exception(f"[/start] TelegramBadRequest sending welcome -> {e}")
-        # نسخه‌ی امن‌تر پیام، بدون HTML و بدون کیبورد
+        logger.warning("[/start] TelegramBadRequest: %s → sending plain fallback", e)
+        # نسخهٔ ساده بدون HTML/کیبورد
         try:
-            await message.answer(
-                "🎉 به DoTask خوش اومدی!\n\n"
-                "➕ تسک اضافه کن\n"
-                "📋 لیست تسک‌ها رو ببین"
-            )
-        except Exception as e2:
-            logger.exception(f"[/start] fallback send failed -> {e2}")
-            await message.answer("❌ خطا در اجرای ربات. لطفاً بعداً تلاش کن.")
-    except Exception as e:
-        logger.exception(f"[/start] unexpected error sending welcome -> {e}")
-        await message.answer("❌ خطا در اجرای ربات. لطفاً بعداً تلاش کن.")
+            if lang.startswith("fa"):
+                await message.answer(
+                    "🎉 خوش اومدی!\n"
+                    f"باز: {open_count} | انجام‌شده: {done_count}\n"
+                    "از منوی پایین یکی رو انتخاب کن."
+                )
+            else:
+                await message.answer(
+                    "🎉 Welcome!\n"
+                    f"Open: {open_count} | Done: {done_count}\n"
+                    "Pick an option from the menu below."
+                )
+        except Exception:
+            logger.exception("[/start] plain fallback failed.")
+            await message.answer("❌ خطا در ارسال پیام. لطفاً بعداً تلاش کن.")
+    except Exception:
+        logger.exception("[/start] unexpected send error.")
+        await message.answer("❌ خطا در ارسال پیام. لطفاً بعداً تلاش کن.")
